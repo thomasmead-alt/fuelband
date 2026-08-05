@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Fuelband — Daily Activity Tracker</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='42' fill='none' stroke='%23c8ff00' stroke-width='14'/></svg>" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">FUEL<span>BAND</span></div>
+      <div class="topbar-date" id="today-date"></div>
+    </header>
+
+    <main>
+      <!-- Hero: today's fuel ring -->
+      <section class="hero card" aria-label="Today's fuel progress">
+        <div class="ring-wrap">
+          <svg class="ring" viewBox="0 0 220 220" role="img" aria-labelledby="ring-title">
+            <title id="ring-title">Fuel earned today versus daily goal</title>
+            <circle class="ring-track" cx="110" cy="110" r="96" />
+            <circle class="ring-fill" id="ring-fill" cx="110" cy="110" r="96" />
+          </svg>
+          <div class="ring-center">
+            <div class="hero-number" id="fuel-today">0</div>
+            <div class="hero-label">FUEL</div>
+          </div>
+        </div>
+        <div class="hero-side">
+          <div class="goal-row">
+            <span class="goal-label">Daily goal</span>
+            <span class="goal-value" id="goal-value">3000</span>
+            <button class="btn-ghost" id="edit-goal" type="button">Edit</button>
+          </div>
+          <div class="goal-pct" id="goal-pct">0% of goal</div>
+          <div class="stat-tiles">
+            <div class="tile">
+              <div class="tile-value" id="stat-steps">0</div>
+              <div class="tile-label">Steps</div>
+            </div>
+            <div class="tile">
+              <div class="tile-value" id="stat-cals">0</div>
+              <div class="tile-label">Calories</div>
+            </div>
+            <div class="tile">
+              <div class="tile-value" id="stat-mins">0</div>
+              <div class="tile-label">Active min</div>
+            </div>
+            <div class="tile">
+              <div class="tile-value" id="stat-streak">0</div>
+              <div class="tile-label">Day streak</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Log an activity -->
+      <section class="card" aria-label="Log an activity">
+        <h2>Log activity</h2>
+        <form id="log-form" class="log-form">
+          <label>
+            <span>Activity</span>
+            <select id="activity-type" required></select>
+          </label>
+          <label>
+            <span>Minutes</span>
+            <input id="activity-mins" type="number" min="1" max="600" value="30" required />
+          </label>
+          <label>
+            <span>Intensity</span>
+            <select id="activity-intensity">
+              <option value="light">Light</option>
+              <option value="moderate" selected>Moderate</option>
+              <option value="intense">Intense</option>
+            </select>
+          </label>
+          <button class="btn-primary" type="submit">Add fuel</button>
+        </form>
+        <ul class="activity-list" id="activity-list"></ul>
+      </section>
+
+      <!-- Weekly chart -->
+      <section class="card" aria-label="Last seven days of fuel">
+        <div class="chart-head">
+          <h2>This week</h2>
+          <button class="btn-ghost" id="toggle-table" type="button" aria-pressed="false">Table view</button>
+        </div>
+        <div class="chart-wrap" id="chart-wrap"></div>
+        <div class="chart-table" id="chart-table" hidden></div>
+      </section>
+    </main>
+
+    <footer class="foot">Data stays on this device (localStorage). Inspired by the classic fuel-point trackers.</footer>
+  </div>
+
+  <div class="tooltip" id="tooltip" role="status" hidden></div>
+  <script src="app.js"></script>
+</body>
+</html>
