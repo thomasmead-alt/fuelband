@@ -156,6 +156,20 @@ body {
 }
 .tooltip .tt-label { color: var(--ink-muted); font-size: 11px; margin-bottom: 2px; }
 
+/* Device connection */
+.device-status { color: var(--ink-muted); font-size: 13px; margin: 4px 0 0; }
+.device-status[data-tone="ok"] { color: var(--ink-secondary); }
+.device-status[data-tone="err"] { color: var(--danger); }
+.device-info { margin-top: 10px; }
+.device-info:empty { display: none; }
+.dev-row {
+  display: flex; justify-content: space-between; gap: 16px;
+  padding: 7px 2px; border-top: 1px solid var(--hairline);
+  font-size: 14px;
+}
+.dev-row span { color: var(--ink-muted); }
+.dev-row code { font-size: 12px; color: var(--ink-secondary); }
+
 .foot { color: var(--ink-muted); font-size: 12px; text-align: center; margin-top: 24px; }
 
 @media (max-width: 560px) {

@@ -15,6 +15,8 @@ alive — all in a single dependency-free web app.
 - **Weekly chart** — the last 7 days of fuel with a goal line, hover tooltips,
   and an accessible table view
 - **Editable goal** — set your own daily fuel target
+- **USB device connection** — plug in a first-generation Nike+ FuelBand and
+  read its model, serial, firmware, battery, and status over WebHID
 - **Local-only data** — everything persists in `localStorage`; nothing leaves
   the device
 
@@ -39,6 +41,28 @@ calories = METs × intensity factor × 3.5 × 70 kg / 200 × minutes
 
 Intensity factors: light 0.75 · moderate 1.0 · intense 1.3.
 
+## Connecting a real FuelBand (USB)
+
+The **Device** card connects to a first-generation Nike+ FuelBand
+(vendor `0x11ac`, product `0x6565`) plugged in over USB, using the
+community reverse-engineered HID feature-report protocol from
+[rbrune/fuelband-usb](https://github.com/rbrune/fuelband-usb). It reads
+model, serial number, firmware version, hardware revision, battery level
+and charging state, status flags, and setup/reset timestamps.
+
+Requirements and limits:
+
+- **WebHID** — Chrome or Edge on desktop, served over https or `localhost`
+  (the button explains itself if either is missing).
+- **Linux** needs a udev rule so the browser can open the hidraw node, e.g.
+  `SUBSYSTEM=="hidraw", ATTRS{idVendor}=="11ac", MODE="0666"` in
+  `/etc/udev/rules.d/99-fuelband.rules`.
+- **No activity sync.** Nike shut down the FuelBand services in 2018, and the
+  part of the USB protocol that carries fuel/step data was never reverse-
+  engineered — only status reads are documented. Activity entries in the app
+  stay manual. (The FuelBand **SE** talks BLE, not this USB protocol, and its
+  sessions are encrypted with device-specific keys.)
+
 ## Project layout
 
 | File | Purpose |
@@ -46,3 +70,4 @@ Intensity factors: light 0.75 · moderate 1.0 · intense 1.3.
 | `index.html` | App shell and layout |
 | `styles.css` | Dark, LED-inspired theme |
 | `app.js` | State, fuel math, rendering, and the weekly SVG chart |
+| `fuelband-usb.js` | WebHID connection to a first-gen FuelBand |

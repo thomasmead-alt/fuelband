@@ -81,6 +81,16 @@
         <ul class="activity-list" id="activity-list"></ul>
       </section>
 
+      <!-- Device connection -->
+      <section class="card" aria-label="Connect a FuelBand over USB">
+        <div class="chart-head">
+          <h2>Device</h2>
+          <button class="btn-ghost" id="connect-device" type="button">Connect FuelBand (USB)</button>
+        </div>
+        <p class="device-status" id="device-status"></p>
+        <div class="device-info" id="device-info"></div>
+      </section>
+
       <!-- Weekly chart -->
       <section class="card" aria-label="Last seven days of fuel">
         <div class="chart-head">
@@ -97,5 +107,6 @@
 
   <div class="tooltip" id="tooltip" role="status" hidden></div>
   <script src="app.js"></script>
+  <script src="fuelband-usb.js"></script>
 </body>
 </html>
