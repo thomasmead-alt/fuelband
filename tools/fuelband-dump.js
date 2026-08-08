@@ -112,6 +112,56 @@ function decodeTs(d) {
   try { return new Date(t * 1000).toISOString(); } catch { return `raw ${t}`; }
 }
 
+const beU32 = (v) => [(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff];
+
+// SET CLOCK — reproduces the official app's doTime (FuelBandCommands.cc):
+// opcode 0x31, payload = time(4B big-endian unix) + gmtOffset(4B big-endian
+// seconds) + dstOffsetMinutes(1B). This is the initialization the band waits
+// for. Reads the clock first, writes it, then re-reads to verify. Safe/
+// recoverable: the band's hardware reset (hold button ~10s) restores factory.
+async function setClock(dev) {
+  const now = Math.floor(Date.now() / 1000);           // UTC seconds
+  const offMin = -new Date().getTimezoneOffset();      // local offset (incl DST), minutes
+  const gmt = (offMin * 60) >>> 0;                     // seconds, as unsigned 32-bit
+  const payload = [0x31, ...beU32(now), ...beU32(gmt), 0x00];
+  console.log("\n=== SET CLOCK (opcode 0x31) ===");
+  console.log(`local time = ${new Date(now * 1000).toString()}`);
+  console.log(`payload    = ${hex(payload)}  (time=${now}, gmtOffset=${offMin * 60}s)`);
+
+  const readClock = async () => {
+    const d = await readData(dev, [0x31]);   // data-family read
+    const s = await readSystem(dev, [0x31]); // system-family read
+    return { d, s };
+  };
+
+  let before = await readClock();
+  console.log(`clock before: data[${before.d ? hex(before.d) : "-"}] sys[${before.s ? hex(before.s) : "-"}]`);
+
+  // Attempt 1: data-family write (feature on output bucket, reply feat#4).
+  console.log("writing clock (data-family framing)…");
+  writeLibfuelband(dev, payload);
+  await delay(80);
+  const r1 = tryRead(dev, 4);
+  console.log(`  reply: ${r1.error ? "err " + r1.error : hex(r1.data)}`);
+  await delay(120);
+  let after = await readClock();
+  console.log(`clock after (data write): data[${after.d ? hex(after.d) : "-"}] sys[${after.s ? hex(after.s) : "-"}]`);
+
+  // Attempt 2 (only if nothing changed): system-family write (07-tagged).
+  const changed = (a, b) => JSON.stringify(a) !== JSON.stringify(b);
+  if (!changed(before.d, after.d) && !changed(before.s, after.s)) {
+    console.log("no change — trying system-family framing (07-tagged)…");
+    writeRbrune(dev, payload);
+    await delay(80);
+    const r2 = tryRead(dev, 1);
+    console.log(`  reply: ${r2.error ? "err " + r2.error : hex(r2.data)}`);
+    await delay(120);
+    after = await readClock();
+    console.log(`clock after (sys write): data[${after.d ? hex(after.d) : "-"}] sys[${after.s ? hex(after.s) : "-"}]`);
+  }
+  console.log("\nNow LOOK AT THE BAND: did it leave the 'connect to USB' screen / show a time?");
+}
+
 // Read a command through BOTH working framings and show what each returns.
 async function readBoth(dev, cmd) {
   const s = await readSystem(dev, cmd);   // system family (07-tagged), reply feat#1
@@ -295,7 +345,10 @@ async function dumpMemory(dev, maxBytes = 320) {
   dev.on("error", (e) => console.error("device error:", e.message));
   try {
     const findIdx = process.argv.indexOf("--find");
-    if (process.argv.includes("--recon")) {
+    if (process.argv.includes("--set-clock")) {
+      await identity(dev);
+      await setClock(dev);
+    } else if (process.argv.includes("--recon")) {
       await recon(dev);
     } else if (findIdx !== -1) {
       const target = Number(process.argv[findIdx + 1]);

@@ -54,3 +54,21 @@ This reads the identity, pages the account region (`43 19`), reads the
 desktop-data block, and reports any offset where that number appears as a
 2/3/4-byte little- or big-endian value. A hit pins down where the fuel field
 lives; from there the reader can be locked in.
+
+## Initializing a fresh band (set the clock)
+
+A factory/reset band shows a "connect to USB" screen and won't track fuel until
+its clock is set — the job the discontinued Nike+ Connect app did. That exact
+command was extracted from the app (see `PROTOCOL.md`): opcode `0x31` with a
+big-endian time, GMT offset, and DST minutes. To send it with your current
+time:
+
+```sh
+node fuelband-dump.js --set-clock
+```
+
+It reads the clock, writes the current time, re-reads to verify, and tells you
+to check whether the band left the setup screen. This writes to the band, but
+it's the same benign command the official app used, and the band's hardware
+reset (hold the button ~10s until RESET flashes) restores factory state if
+anything looks off.
