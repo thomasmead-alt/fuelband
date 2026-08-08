@@ -64,10 +64,22 @@ function writeLibfuelband(dev, cmd) {
 }
 
 // rbrune: write feature [0x01, len+1, 0x07, ...cmd], read feature id 1.
+// Only valid for SHORT commands (fits report id 1's 7 bytes).
 function writeRbrune(dev, cmd) {
   const buf = [0x01, cmd.length + 1, 0x07, ...cmd];
   dev.sendFeatureReport(buf);
   return { outId: 0x01, buf };
+}
+
+// System family, bucket-aware: frame [len+1, 0x07, ...cmd] and write it on the
+// smallest OUTPUT report that fits, so longer 07-tagged commands (like the
+// 13-byte set-clock) aren't truncated onto the 7-byte report id 1.
+function writeSystem(dev, cmd) {
+  const body = [cmd.length + 1, 0x07, ...cmd];
+  const [size, outId] = bucket(body.length);
+  const buf = [outId, ...body, ...new Array(Math.max(0, size - body.length)).fill(0)];
+  dev.sendFeatureReport(buf);
+  return { outId, buf };
 }
 
 function tryRead(dev, readId, len = 64) {
@@ -135,29 +147,29 @@ async function setClock(dev) {
   };
 
   let before = await readClock();
-  console.log(`clock before: data[${before.d ? hex(before.d) : "-"}] sys[${before.s ? hex(before.s) : "-"}]`);
+  console.log(`clock before: sys[${before.s ? hex(before.s) : "-"}]`);
 
-  // Attempt 1: data-family write (feature on output bucket, reply feat#4).
-  console.log("writing clock (data-family framing)…");
-  writeLibfuelband(dev, payload);
-  await delay(80);
-  const r1 = tryRead(dev, 4);
-  console.log(`  reply: ${r1.error ? "err " + r1.error : hex(r1.data)}`);
-  await delay(120);
+  // Write the clock on the 07-tagged system channel, bucket-aware so the full
+  // 13-byte command isn't truncated. Read the reply on feat#1 and feat#4.
+  console.log("writing clock (07-tagged, bucket-aware)…");
+  const w = writeSystem(dev, payload);
+  console.log(`  sent on out#${w.outId}: ${hex(w.buf)}`);
+  await delay(100);
+  const r1 = tryRead(dev, 1), r4 = tryRead(dev, 4);
+  console.log(`  reply feat#1: ${r1.error ? "err " + r1.error : hex(r1.data)}`);
+  console.log(`  reply feat#4: ${r4.error ? "err " + r4.error : hex(r4.data)}`);
+
+  await delay(150);
   let after = await readClock();
-  console.log(`clock after (data write): data[${after.d ? hex(after.d) : "-"}] sys[${after.s ? hex(after.s) : "-"}]`);
-
-  // Attempt 2 (only if nothing changed): system-family write (07-tagged).
-  const changed = (a, b) => JSON.stringify(a) !== JSON.stringify(b);
-  if (!changed(before.d, after.d) && !changed(before.s, after.s)) {
-    console.log("no change — trying system-family framing (07-tagged)…");
-    writeRbrune(dev, payload);
-    await delay(80);
-    const r2 = tryRead(dev, 1);
-    console.log(`  reply: ${r2.error ? "err " + r2.error : hex(r2.data)}`);
-    await delay(120);
-    after = await readClock();
-    console.log(`clock after (sys write): data[${after.d ? hex(after.d) : "-"}] sys[${after.s ? hex(after.s) : "-"}]`);
+  console.log(`clock after: sys[${after.s ? hex(after.s) : "-"}]`);
+  // Decode a big-endian u32 timestamp if the reply carries one (skip opcode/tag).
+  if (after.s && after.s.length >= 5) {
+    for (let off = 1; off + 4 <= after.s.length; off++) {
+      const t = ((after.s[off] << 24) | (after.s[off + 1] << 16) | (after.s[off + 2] << 8) | after.s[off + 3]) >>> 0;
+      if (t > 1500000000 && t < 2000000000) {
+        console.log(`  -> decoded time @${off}: ${new Date(t * 1000).toString()}`);
+      }
+    }
   }
   console.log("\nNow LOOK AT THE BAND: did it leave the 'connect to USB' screen / show a time?");
 }
