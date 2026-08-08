@@ -57,11 +57,29 @@ Requirements and limits:
 - **Linux** needs a udev rule so the browser can open the hidraw node, e.g.
   `SUBSYSTEM=="hidraw", ATTRS{idVendor}=="11ac", MODE="0666"` in
   `/etc/udev/rules.d/99-fuelband.rules`.
-- **No activity sync.** Nike shut down the FuelBand services in 2018, and the
-  part of the USB protocol that carries fuel/step data was never reverse-
-  engineered — only status reads are documented. Activity entries in the app
-  stay manual. (The FuelBand **SE** talks BLE, not this USB protocol, and its
-  sessions are encrypted with device-specific keys.)
+- **No turnkey activity sync (yet).** Nike shut down the FuelBand services in
+  2018, and the part of the USB protocol that carries fuel/step data was never
+  reverse-engineered — existing tools only decode device status. The **decode
+  lab** below is the path to changing that.
+
+### Decode lab (original band)
+
+Once connected, two buttons appear:
+
+- **Read data dump** pulls the ~280-byte "desktop data" memory block
+  (command `0x50 0x37 0x36`, read iteratively) — the same block Nike's desktop
+  app read — and shows it as a hex/ASCII dump.
+- **Read log** pulls the band's ASCII system log (command `0xf6 0x00`).
+
+To locate the fuel field, read a number off the band's own display (fuel,
+steps, or calories) and type it into **"Value shown on the band."** The lab
+scans the dump for that number encoded little-endian as a 2-, 3-, or 4-byte
+word and reports the offset and width of any match. Repeat as the number
+changes to confirm the field. That offset is the missing piece the original
+reverse-engineers never nailed down — and it needs a physical band to find.
+
+> Tip: if the band shows a **USB/battery icon**, its battery is too low to run.
+> Charge it fully over USB before dumping, or you'll get empty/garbage data.
 
 ## Project layout
 

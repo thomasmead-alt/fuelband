@@ -110,6 +110,66 @@
     return info;
   }
 
+  // ---------- Raw dumps (the reverse-engineering surface) ----------
+
+  // "Desktop data" memory dump — the block Nike's desktop app read.
+  // Protocol: send [0x50,0x37,0x36, off0,off1,off2]; response is
+  // [status, off0,off1,off2, ...data]; loop while status === 0x01.
+  async function dumpDesktopData(maxBytes = 280) {
+    const out = [];
+    let status = 0x01;
+    let offset = [0x00, 0x00, 0x00];
+    let guard = 0;
+    while (status === 0x01 && guard++ < 128) {
+      const d = await command([0x50, 0x37, 0x36, ...offset]);
+      status = d[0];
+      offset = [d[1], d[2], d[3]];
+      for (let i = 4; i < d.length; i++) out.push(d[i]);
+      if (out.length >= maxBytes) break;
+    }
+    return new Uint8Array(out.slice(0, maxBytes));
+  }
+
+  // System log — ASCII text the band emits.
+  async function dumpLog(maxIters = 256) {
+    let text = "";
+    for (let i = 0; i < maxIters; i++) {
+      const d = await command([0xf6, 0x00]);
+      if (!d.length) break;
+      text += ascii(d);
+    }
+    return text;
+  }
+
+  // ---------- Decode helpers ----------
+
+  const u16le = (b, off = 0) => (b[off] | (b[off + 1] << 8)) >>> 0;
+  const u24le = (b, off = 0) => (b[off] | (b[off + 1] << 8) | (b[off + 2] << 16)) >>> 0;
+
+  // Scan a byte buffer for a target integer encoded little-endian as
+  // 2/3/4-byte words at any offset. Returns matches [{offset, width}].
+  function scanForValue(buf, target) {
+    const hits = [];
+    for (let i = 0; i < buf.length; i++) {
+      if (i + 2 <= buf.length && u16le(buf, i) === target) hits.push({ offset: i, width: 2 });
+      if (i + 3 <= buf.length && u24le(buf, i) === target) hits.push({ offset: i, width: 3 });
+      if (i + 4 <= buf.length && u32le(buf, i) === target) hits.push({ offset: i, width: 4 });
+    }
+    return hits;
+  }
+
+  function hexDump(buf) {
+    const lines = [];
+    for (let i = 0; i < buf.length; i += 16) {
+      const slice = buf.subarray(i, i + 16);
+      const off = i.toString(16).padStart(4, "0");
+      const hexPart = Array.from(slice).map((x) => x.toString(16).padStart(2, "0")).join(" ").padEnd(16 * 3 - 1, " ");
+      const asciiPart = Array.from(slice).map((x) => (x >= 0x20 && x < 0x7f ? String.fromCharCode(x) : "·")).join("");
+      lines.push(`${off}  ${hexPart}  ${asciiPart}`);
+    }
+    return lines.join("\n");
+  }
+
   // ---------- UI ----------
 
   const $ = (id) => document.getElementById(id);
@@ -143,6 +203,42 @@
     el.dataset.tone = tone;
   }
 
+  // ---------- Decode lab ----------
+
+  let lastDump = null; // Uint8Array of the most recent desktop-data dump
+
+  function renderDump() {
+    const lab = $("decode-lab");
+    if (!lastDump || !lastDump.length) {
+      lab.innerHTML = `<p class="device-status">No bytes returned. If the band shows a USB/low-battery icon, charge it fully first, then dump again.</p>`;
+      return;
+    }
+    lab.innerHTML = `
+      <div class="lab-scan">
+        <label>Value shown on the band
+          <input id="scan-target" type="number" min="0" placeholder="e.g. 2417" />
+        </label>
+        <button class="btn-ghost" id="scan-btn" type="button">Find in dump</button>
+        <span class="device-status" id="scan-result"></span>
+      </div>
+      <pre class="hexdump" id="hexdump">${hexDump(lastDump)}</pre>
+      <p class="device-status">${lastDump.length} bytes. Read the fuel (or steps) number off the band's display and search for it — a match tells us the offset and width of that field.</p>
+    `;
+    $("scan-btn").addEventListener("click", () => {
+      const target = Number($("scan-target").value);
+      const res = $("scan-result");
+      if (!Number.isFinite(target) || target <= 0) {
+        res.textContent = "Enter a positive number first.";
+        return;
+      }
+      const hits = scanForValue(lastDump, target);
+      res.textContent = hits.length
+        ? `Found at ${hits.map((h) => `offset ${h.offset} (${h.width}-byte LE)`).join(", ")}`
+        : "No little-endian match. Try steps/calories, or dump again after the value changes.";
+      // Highlight is left as plain text; offsets pinpoint the field for us.
+    });
+  }
+
   function init() {
     const btn = $("connect-device");
     if (!supported()) {
@@ -161,6 +257,10 @@
         await disconnect();
         btn.textContent = "Connect FuelBand (USB)";
         $("device-info").innerHTML = "";
+        $("decode-lab").innerHTML = "";
+        $("dump-btn").hidden = true;
+        $("log-btn").hidden = true;
+        lastDump = null;
         setStatus("Disconnected.");
         return;
       }
@@ -169,11 +269,38 @@
         await connect();
         setStatus(`Connected to ${device.productName || "FuelBand"} — reading…`);
         renderInfo(await readInfo());
-        setStatus("Connected. Fuel/activity sync isn't possible over USB — that part of the protocol was never reverse-engineered — so entries here stay manual.", "ok");
+        setStatus("Connected. Use the decode lab below to pull the raw data block off the band — fuel/activity aren't in a documented format yet, so we hunt for them.", "ok");
         btn.textContent = "Disconnect";
+        $("dump-btn").hidden = false;
+        $("log-btn").hidden = false;
       } catch (err) {
         await disconnect().catch(() => {});
         setStatus(`Connection failed: ${err.message}`, "err");
+      }
+    });
+
+    $("dump-btn").addEventListener("click", async () => {
+      if (!device) return;
+      try {
+        setStatus("Reading desktop-data block…");
+        lastDump = await dumpDesktopData();
+        renderDump();
+        setStatus(`Dumped ${lastDump.length} bytes. Now search for a number from the band's display.`, "ok");
+      } catch (err) {
+        setStatus(`Dump failed: ${err.message}`, "err");
+      }
+    });
+
+    $("log-btn").addEventListener("click", async () => {
+      if (!device) return;
+      try {
+        setStatus("Reading system log…");
+        const log = await dumpLog();
+        $("decode-lab").innerHTML =
+          `<pre class="hexdump">${log ? log.replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c])) : "(empty log)"}</pre>`;
+        setStatus("System log read.", "ok");
+      } catch (err) {
+        setStatus(`Log read failed: ${err.message}`, "err");
       }
     });
 
@@ -181,6 +308,8 @@
       if (ev.device === device) {
         device = null;
         btn.textContent = "Connect FuelBand (USB)";
+        $("dump-btn").hidden = true;
+        $("log-btn").hidden = true;
         setStatus("Device unplugged.");
       }
     });

@@ -85,10 +85,15 @@
       <section class="card" aria-label="Connect a FuelBand over USB">
         <div class="chart-head">
           <h2>Device</h2>
-          <button class="btn-ghost" id="connect-device" type="button">Connect FuelBand (USB)</button>
+          <div class="device-actions">
+            <button class="btn-ghost" id="dump-btn" type="button" hidden>Read data dump</button>
+            <button class="btn-ghost" id="log-btn" type="button" hidden>Read log</button>
+            <button class="btn-ghost" id="connect-device" type="button">Connect FuelBand (USB)</button>
+          </div>
         </div>
         <p class="device-status" id="device-status"></p>
         <div class="device-info" id="device-info"></div>
+        <div class="decode-lab" id="decode-lab"></div>
       </section>
 
       <!-- Weekly chart -->

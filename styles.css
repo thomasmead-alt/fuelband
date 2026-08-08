@@ -170,6 +170,34 @@ body {
 .dev-row span { color: var(--ink-muted); }
 .dev-row code { font-size: 12px; color: var(--ink-secondary); }
 
+.device-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* Decode lab */
+.decode-lab:empty { display: none; }
+.decode-lab { margin-top: 14px; }
+.lab-scan {
+  display: flex; gap: 12px; align-items: end; flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.lab-scan label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--ink-secondary); }
+.lab-scan input {
+  background: var(--surface-0); border: 1px solid var(--baseline);
+  border-radius: 8px; color: var(--ink-primary);
+  padding: 9px 10px; font-size: 14px; width: 160px;
+}
+.hexdump {
+  background: var(--surface-0);
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  padding: 12px;
+  overflow-x: auto;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px; line-height: 1.5;
+  color: var(--ink-secondary);
+  white-space: pre;
+  margin: 0 0 10px;
+}
+
 .foot { color: var(--ink-muted); font-size: 12px; text-align: center; margin-top: 24px; }
 
 @media (max-width: 560px) {
