@@ -126,6 +126,23 @@ function decodeTs(d) {
 
 const beU32 = (v) => [(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff];
 
+// The Nike app sends commands as OUTPUT reports (HidD_SetOutputReport), not
+// feature reports — confirmed by disassembly. node-hid's device.write() does
+// exactly that (buf[0] = report id). State-changing commands (set clock, etc.)
+// only commit when sent this way; feature-writes are only tolerated for reads.
+const padTo = (arr, n) => arr.concat(new Array(Math.max(0, n - arr.length)).fill(0));
+function frameSys(cmd) {  // 07-tagged system framing, bucket-aware
+  const body = [cmd.length + 1, 0x07, ...cmd];
+  const [size, outId] = bucket(body.length);
+  return [outId, ...padTo(body, size)];
+}
+function frameData(cmd) { // plain data framing, bucket-aware
+  const body = [cmd.length, ...cmd];
+  const [size, outId] = bucket(body.length);
+  return [outId, ...padTo(body, size)];
+}
+function outWrite(dev, buf) { dev.write(buf); } // output report
+
 // SET CLOCK — reproduces the official app's doTime (FuelBandCommands.cc):
 // opcode 0x31, payload = time(4B big-endian unix) + gmtOffset(4B big-endian
 // seconds) + dstOffsetMinutes(1B). This is the initialization the band waits
@@ -146,29 +163,34 @@ async function setClock(dev) {
     return { d, s };
   };
 
+  const decode = (label, d) => {
+    if (!d) return;
+    for (let off = 1; off + 4 <= d.length; off++) {
+      const t = ((d[off] << 24) | (d[off + 1] << 16) | (d[off + 2] << 8) | d[off + 3]) >>> 0;
+      if (t > 1500000000 && t < 2000000000) console.log(`  -> ${label} decoded time @${off}: ${new Date(t * 1000).toString()}`);
+    }
+  };
+
   let before = await readClock();
-  console.log(`clock before: sys[${before.s ? hex(before.s) : "-"}]`);
+  console.log(`clock before: sys[${before.s ? hex(before.s) : "-"}] data[${before.d ? hex(before.d) : "-"}]`);
 
-  // Write the clock on the 07-tagged system channel, bucket-aware so the full
-  // 13-byte command isn't truncated. Read the reply on feat#1 and feat#4.
-  console.log("writing clock (07-tagged, bucket-aware)…");
-  const w = writeSystem(dev, payload);
-  console.log(`  sent on out#${w.outId}: ${hex(w.buf)}`);
-  await delay(100);
-  const r1 = tryRead(dev, 1), r4 = tryRead(dev, 4);
-  console.log(`  reply feat#1: ${r1.error ? "err " + r1.error : hex(r1.data)}`);
-  console.log(`  reply feat#4: ${r4.error ? "err " + r4.error : hex(r4.data)}`);
-
-  await delay(150);
-  let after = await readClock();
-  console.log(`clock after: sys[${after.s ? hex(after.s) : "-"}]`);
-  // Decode a big-endian u32 timestamp if the reply carries one (skip opcode/tag).
-  if (after.s && after.s.length >= 5) {
-    for (let off = 1; off + 4 <= after.s.length; off++) {
-      const t = ((after.s[off] << 24) | (after.s[off + 1] << 16) | (after.s[off + 2] << 8) | after.s[off + 3]) >>> 0;
-      if (t > 1500000000 && t < 2000000000) {
-        console.log(`  -> decoded time @${off}: ${new Date(t * 1000).toString()}`);
-      }
+  // Send the clock command as an OUTPUT report (how the app does it). Try the
+  // 07-tagged framing first, then the plain framing if nothing changes.
+  const changed = (a, b) => JSON.stringify(a) !== JSON.stringify(b);
+  for (const [name, frame] of [["07-tagged", frameSys(payload)], ["plain", frameData(payload)]]) {
+    console.log(`writing clock as OUTPUT report (${name}): ${hex(frame)}`);
+    outWrite(dev, frame);
+    await delay(120);
+    const r1 = tryRead(dev, 1), r4 = tryRead(dev, 4);
+    console.log(`  reply feat#1: ${r1.error ? "err " + r1.error : hex(r1.data)}`);
+    console.log(`  reply feat#4: ${r4.error ? "err " + r4.error : hex(r4.data)}`);
+    await delay(150);
+    const after = await readClock();
+    console.log(`  clock after: sys[${after.s ? hex(after.s) : "-"}] data[${after.d ? hex(after.d) : "-"}]`);
+    decode("sys", after.s); decode("data", after.d);
+    if (changed(before.s, after.s) || changed(before.d, after.d)) {
+      console.log(`  *** clock CHANGED with ${name} output-report framing ***`);
+      break;
     }
   }
   console.log("\nNow LOOK AT THE BAND: did it leave the 'connect to USB' screen / show a time?");
