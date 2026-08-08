@@ -103,37 +103,85 @@
     return BUCKETS[BUCKETS.length - 1];
   }
 
-  // Low-level exchange. Returns the raw reply { reportId, data } where data is
-  // the input-report bytes (excluding the report id). Nothing is stripped, so
-  // the response header can be inspected against real hardware.
-  async function exchange(cmd, { timeout = 2500 } = {}) {
-    if (!device?.opened) throw new Error("Not connected.");
+  const u8 = (view) => new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+  const FEATURE_ID = 113; // the only declared feature report on this band (7B)
+
+  function frameBody(cmd) {
     const body = [cmd.length, ...cmd];
-    const [size, outId] = pickBucket(body.length);
+    const [size, outId, inId] = pickBucket(body.length);
     const buf = new Uint8Array(size);
     buf.set(body.slice(0, size));
+    return { buf, outId, inId, size };
+  }
 
-    const reply = new Promise((resolve, reject) => {
-      const onInput = (e) => {
-        cleanup();
-        resolve({
-          reportId: e.reportId,
-          data: new Uint8Array(e.data.buffer, e.data.byteOffset, e.data.byteLength),
-        });
-      };
-      const timer = setTimeout(() => {
-        cleanup();
-        reject(new Error("no input-report reply (timeout)"));
-      }, timeout);
+  // Wait for the next input-report event, or time out.
+  function waitInput(timeout) {
+    return new Promise((resolve, reject) => {
+      const onInput = (e) => { cleanup(); resolve({ reportId: e.reportId, data: u8(e.data) }); };
+      const timer = setTimeout(() => { cleanup(); reject(new Error("input timeout")); }, timeout);
       const cleanup = () => { clearTimeout(timer); device.removeEventListener("inputreport", onInput); };
       device.addEventListener("inputreport", onInput);
     });
-
-    await device.sendReport(outId, buf);
-    return reply;
   }
 
-  // Convenience: return just the reply data bytes (still unstripped).
+  // Try one command through every plausible send/receive channel and report
+  // what each returns. This is the diagnostic that tells us how THIS band's
+  // firmware wants to be addressed.
+  async function exchangeAll(cmd, { timeout = 1000 } = {}) {
+    if (!device?.opened) throw new Error("Not connected.");
+    const { buf, outId } = frameBody(cmd);
+    const results = [];
+    const record = (via, promiseFactory) => promiseFactory()
+      .then((r) => results.push({ via, ok: true, ...r }))
+      .catch((e) => results.push({ via, ok: false, error: e.message }));
+
+    // A: output report → input-report event
+    await record(`out#${outId} → input`, async () => {
+      const p = waitInput(timeout);
+      await device.sendReport(outId, buf);
+      return p;
+    });
+    await delay(30);
+
+    // B: output report → GET feature report 113
+    await record(`out#${outId} → feat#${FEATURE_ID}`, async () => {
+      await device.sendReport(outId, buf);
+      await delay(60);
+      return { reportId: FEATURE_ID, data: u8(await device.receiveFeatureReport(FEATURE_ID)) };
+    });
+    await delay(30);
+
+    // C: SET feature 113 (cmd padded to 7) → GET feature 113
+    await record(`feat#${FEATURE_ID} → feat#${FEATURE_ID}`, async () => {
+      const fb = new Uint8Array(7);
+      fb.set([cmd.length, ...cmd].slice(0, 7));
+      await device.sendFeatureReport(FEATURE_ID, fb);
+      await delay(60);
+      return { reportId: FEATURE_ID, data: u8(await device.receiveFeatureReport(FEATURE_ID)) };
+    });
+    await delay(30);
+
+    // D: SET feature 113 → input-report event
+    await record(`feat#${FEATURE_ID} → input`, async () => {
+      const fb = new Uint8Array(7);
+      fb.set([cmd.length, ...cmd].slice(0, 7));
+      const p = waitInput(timeout);
+      await device.sendFeatureReport(FEATURE_ID, fb);
+      return p;
+    });
+
+    return results;
+  }
+
+  // Single-strategy exchange used once we know which channel works. Defaults to
+  // output→input; override via opts.channel later.
+  async function exchange(cmd, { timeout = 2000 } = {}) {
+    const { buf, outId } = frameBody(cmd);
+    const p = waitInput(timeout);
+    await device.sendReport(outId, buf);
+    return p;
+  }
+
   async function command(cmd) {
     const { data } = await exchange(cmd);
     return data;
@@ -154,30 +202,10 @@
     return new Date(secs * 1000);
   }
 
-  // Probe a set of candidate commands and capture the raw replies, so we can
-  // read the actual response framing off real hardware rather than assume it.
-  // Command bytes here follow the libfuelband style (opcode + args); the exact
-  // opcodes for this firmware are what we're confirming.
-  const PROBES = [
-    { name: "version?", cmd: [0x08] },
-    { name: "serial?", cmd: [0xe1] },
-    { name: "status?", cmd: [0xdf] },
-    { name: "battery?", cmd: [0x13] },
-    { name: "settings?", cmd: [0x41] },
-  ];
-
+  // On connect, fire the memory-read command through every send/receive channel
+  // so we can immediately see which one (if any) the band answers on.
   async function probe() {
-    const results = [];
-    for (const p of PROBES) {
-      try {
-        const { reportId, data } = await exchange(p.cmd);
-        results.push({ ...p, reportId, data });
-      } catch (err) {
-        results.push({ ...p, error: err.message });
-      }
-      await delay(40);
-    }
-    return results;
+    return exchangeAll([0xbb, 0x50, 0x37, 0x36, 0x00, 0x00, 0x00]);
   }
 
   // ---------- Raw dumps (the reverse-engineering surface) ----------
@@ -259,14 +287,17 @@
   }
 
   const bytesHex = (b) => Array.from(b).map((x) => x.toString(16).padStart(2, "0")).join(" ");
+  const allZero = (b) => b.every((x) => x === 0);
 
+  // Render strategy-matrix results (from exchangeAll).
   function renderProbe(results) {
     $("device-info").innerHTML = results
       .map((r) => {
-        const val = r.error
-          ? `<code>— ${r.error}</code>`
-          : `<code>in#${r.reportId}: ${bytesHex(r.data)} · "${ascii(r.data) || "·"}"</code>`;
-        return `<div class="dev-row"><span>${r.name} [${bytesHex(r.cmd)}]</span>${val}</div>`;
+        let val;
+        if (!r.ok) val = `<code>— ${r.error}</code>`;
+        else if (allZero(r.data)) val = `<code>in#${r.reportId}: all-zero (${r.data.length}B)</code>`;
+        else val = `<code>in#${r.reportId}: ${bytesHex(r.data)} · "${ascii(r.data) || "·"}"</code>`;
+        return `<div class="dev-row"><span>${r.via}</span>${val}</div>`;
       })
       .join("");
   }
@@ -358,15 +389,15 @@
       const out = $("raw-out");
       if (!device) { out.textContent = "Not connected."; return; }
       if (!bytes.length) { out.textContent = "Enter at least one hex byte."; return; }
-      try {
-        const { reportId, data } = await exchange(bytes);
-        out.textContent =
-          `sent (out): ${bytesHex(bytes)}\n` +
-          `reply (in#${reportId}): ${bytesHex(data)}\n` +
-          `ascii: ${ascii(data) || "·"}`;
-      } catch (err) {
-        out.textContent = `sent (out): ${bytesHex(bytes)}\nerror: ${err.message}`;
-      }
+      out.textContent = `sent: ${bytesHex(bytes)}\ntrying all channels…`;
+      const results = await exchangeAll(bytes);
+      out.textContent =
+        `sent: ${bytesHex(bytes)}\n\n` +
+        results.map((r) =>
+          r.ok
+            ? `${r.via}: in#${r.reportId}: ${bytesHex(r.data)}${allZero(r.data) ? " (all-zero)" : ` · "${ascii(r.data) || "·"}"`}`
+            : `${r.via}: — ${r.error}`
+        ).join("\n");
     };
     $("raw-send").addEventListener("click", () => send(parse($("raw-input").value)));
     el.querySelectorAll(".raw-presets button").forEach((b) =>
