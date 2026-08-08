@@ -40,3 +40,17 @@ the band's display against the dumped bytes. Once the offset is known, the web
 app can decode and display it.
 
 `node fuelband-dump.js --dump` skips the probes and goes straight to a dump.
+
+## Finding the fuel value
+
+Once you can read a number off the band's display (fuel or steps), search for
+it directly:
+
+```sh
+node fuelband-dump.js --find 2417
+```
+
+This reads the identity, pages the account region (`43 19`), reads the
+desktop-data block, and reports any offset where that number appears as a
+2/3/4-byte little- or big-endian value. A hit pins down where the fuel field
+lives; from there the reader can be locked in.

@@ -79,6 +79,86 @@ function tryRead(dev, readId, len = 64) {
   }
 }
 
+// High-level readers built on the two framings that this band answers on.
+// System family (version/serial): rbrune framing, tag 0x07, reply on feat#1.
+async function readSystem(dev, cmd) {
+  writeRbrune(dev, cmd);
+  await delay(40);
+  const r = tryRead(dev, 1);
+  if (r.error || !r.data) return null;
+  return r.data.slice(3); // strip [reportId, len, 0x07]
+}
+// Data family (account/memory): libfuelband framing, reply on feat#4.
+async function readData(dev, cmd) {
+  writeLibfuelband(dev, cmd);
+  await delay(40);
+  const r = tryRead(dev, 4);
+  if (r.error || !r.data) return null;
+  return r.data; // raw: [reportId, len, opcode, ...header, ...data]
+}
+
+async function identity(dev) {
+  console.log("\n=== IDENTITY ===");
+  const ver = await readSystem(dev, [0x08]);
+  const ser = await readSystem(dev, [0xe1]);
+  if (ver) console.log(`firmware: ${ascii(ver).replace(/\.+$/,"")}  (${hex(ver)})`);
+  if (ser) console.log(`serial:   ${ascii(ser)}`);
+}
+
+// Read the 0x43 0x19 account region, paging by 0x37 until a short reply.
+async function readAccountRegion(dev) {
+  const collected = [];
+  for (let offset = 0, i = 0; i < 32; i++) {
+    const off = [(offset >> 16) & 0xff, (offset >> 8) & 0xff, offset & 0xff];
+    const r = await readData(dev, [0x43, 0x19, ...off]);
+    if (!r || r.length < 3) break;
+    const len = r[1];
+    console.log(`  43/19 @${offset}: ${hex(r)}`);
+    for (let j = 3; j < r.length; j++) collected.push(r[j]);
+    if (len !== 0x3d) break; // 0x3d = full chunk -> more data
+    offset += 0x37;
+  }
+  return collected;
+}
+
+// Scan a byte buffer for a number as 2/3/4-byte little- and big-endian.
+function scanValue(label, buf, target) {
+  const hits = [];
+  const le = (o, w) => { let v = 0; for (let k = 0; k < w; k++) v |= buf[o + k] << (8 * k); return v >>> 0; };
+  const be = (o, w) => { let v = 0; for (let k = 0; k < w; k++) v = (v << 8) | buf[o + k]; return v >>> 0; };
+  for (let o = 0; o < buf.length; o++) {
+    for (const w of [2, 3, 4]) {
+      if (o + w > buf.length) continue;
+      if (le(o, w) === target) hits.push(`${label}[${o}] ${w}B LE`);
+      if (be(o, w) === target) hits.push(`${label}[${o}] ${w}B BE`);
+    }
+  }
+  return hits;
+}
+
+async function find(dev, target) {
+  console.log(`\n=== FIND ${target} ===`);
+  await identity(dev);
+  console.log("\naccount region (43 19):");
+  const account = await readAccountRegion(dev);
+  console.log("\ndesktop-data (bb 50 37 36):");
+  const mem = [];
+  for (let offset = 0, i = 0; i < 8; i++) {
+    const off = [(offset >> 16) & 0xff, (offset >> 8) & 0xff, offset & 0xff];
+    const r = await readData(dev, [0xbb, 0x50, 0x37, 0x36, ...off]);
+    if (!r) break;
+    for (let j = 7; j < r.length; j++) mem.push(r[j]);
+    if (r[1] !== 0x3d) break;
+    offset += 0x37;
+  }
+  const hits = [
+    ...scanValue("account", account, target),
+    ...scanValue("memory", mem, target),
+  ];
+  console.log("\nmatches:", hits.length ? hits.join(", ") : "none");
+  console.log("account bytes:", hex(account) || "(none)");
+}
+
 // --- Probe ----------------------------------------------------------------
 
 const PROBE_CMDS = [
@@ -170,8 +250,19 @@ async function dumpMemory(dev, maxBytes = 320) {
   const dev = openDevice();
   dev.on("error", (e) => console.error("device error:", e.message));
   try {
-    if (!process.argv.includes("--dump")) await probe(dev);
-    await dumpMemory(dev);
+    const findIdx = process.argv.indexOf("--find");
+    if (findIdx !== -1) {
+      const target = Number(process.argv[findIdx + 1]);
+      if (!Number.isFinite(target)) { console.error("Usage: node fuelband-dump.js --find <number>"); }
+      else await find(dev, target);
+    } else if (process.argv.includes("--dump")) {
+      await identity(dev);
+      await dumpMemory(dev);
+    } else {
+      await identity(dev);
+      await probe(dev);
+      await dumpMemory(dev);
+    }
   } finally {
     dev.close();
   }
