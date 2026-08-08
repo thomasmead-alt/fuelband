@@ -92,45 +92,51 @@
     return lines.join("\n");
   }
 
-  // Send [len+1, 0x07, ...cmd], then read the reply. Tries the discovered
-  // report id and mechanism, with fallbacks, since the exact framing can only
-  // be confirmed against real hardware.
-  async function command(cmd) {
+  // Nike size-bucketed reports (confirmed from this band's descriptor and the
+  // libfuelband reference): pick the smallest OUTPUT report that fits the body,
+  // send [length, ...cmd], and read the reply as an INPUT report event.
+  // [dataBytes, outputReportId, inputReportId]
+  const BUCKETS = [[7, 9, 1], [15, 10, 2], [31, 11, 3], [63, 12, 4]];
+
+  function pickBucket(bodyLen) {
+    for (const b of BUCKETS) if (bodyLen <= b[0]) return b;
+    return BUCKETS[BUCKETS.length - 1];
+  }
+
+  // Low-level exchange. Returns the raw reply { reportId, data } where data is
+  // the input-report bytes (excluding the report id). Nothing is stripped, so
+  // the response header can be inspected against real hardware.
+  async function exchange(cmd, { timeout = 2500 } = {}) {
     if (!device?.opened) throw new Error("Not connected.");
-    const payload = new Uint8Array(2 + cmd.length);
-    payload[0] = cmd.length + 1;
-    payload[1] = 0x07;
-    payload.set(cmd, 2);
+    const body = [cmd.length, ...cmd];
+    const [size, outId] = pickBucket(body.length);
+    const buf = new Uint8Array(size);
+    buf.set(body.slice(0, size));
 
-    const strip = (view) => {
-      let bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
-      if (bytes[0] === REPORT_ID && REPORT_ID !== 0) bytes = bytes.subarray(1);
-      return bytes.subarray(2); // skip [len, tag]
-    };
+    const reply = new Promise((resolve, reject) => {
+      const onInput = (e) => {
+        cleanup();
+        resolve({
+          reportId: e.reportId,
+          data: new Uint8Array(e.data.buffer, e.data.byteOffset, e.data.byteLength),
+        });
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error("no input-report reply (timeout)"));
+      }, timeout);
+      const cleanup = () => { clearTimeout(timer); device.removeEventListener("inputreport", onInput); };
+      device.addEventListener("inputreport", onInput);
+    });
 
-    if (USE_INPUT_REPLY) {
-      const reply = new Promise((resolve, reject) => {
-        const onInput = (e) => { cleanup(); resolve(strip(e.data)); };
-        const timer = setTimeout(() => { cleanup(); reject(new Error("No reply (input report timed out)")); }, 1500);
-        const cleanup = () => { clearTimeout(timer); device.removeEventListener("inputreport", onInput); };
-        device.addEventListener("inputreport", onInput);
-      });
-      await device.sendReport(REPORT_ID, payload);
-      return reply;
-    }
+    await device.sendReport(outId, buf);
+    return reply;
+  }
 
-    // Feature-report request/response. Retry the receive with report id 0 if the
-    // discovered id is rejected by the browser.
-    await device.sendFeatureReport(REPORT_ID, payload);
-    await delay(30);
-    try {
-      return strip(await device.receiveFeatureReport(REPORT_ID));
-    } catch (err) {
-      if (REPORT_ID !== 0) {
-        return strip(await device.receiveFeatureReport(0));
-      }
-      throw err;
-    }
+  // Convenience: return just the reply data bytes (still unstripped).
+  async function command(cmd) {
+    const { data } = await exchange(cmd);
+    return data;
   }
 
   const ascii = (b) =>
@@ -148,61 +154,67 @@
     return new Date(secs * 1000);
   }
 
-  async function readInfo() {
-    const info = {};
-    const tryCmd = async (name, cmd, parse) => {
-      try {
-        info[name] = parse(await command(cmd));
-      } catch (err) {
-        info[name] = null;
-        console.warn(`fuelband: ${name} failed`, err);
-      }
-    };
+  // Probe a set of candidate commands and capture the raw replies, so we can
+  // read the actual response framing off real hardware rather than assume it.
+  // Command bytes here follow the libfuelband style (opcode + args); the exact
+  // opcodes for this firmware are what we're confirming.
+  const PROBES = [
+    { name: "version?", cmd: [0x08] },
+    { name: "serial?", cmd: [0xe1] },
+    { name: "status?", cmd: [0xdf] },
+    { name: "battery?", cmd: [0x13] },
+    { name: "settings?", cmd: [0x41] },
+  ];
 
-    await tryCmd("model", CMD.modelNumber, ascii);
-    await tryCmd("serial", CMD.serialNumber, ascii);
-    await tryCmd("firmware", CMD.firmwareVersion, (b) =>
-      b.length >= 3 ? `${String.fromCharCode(b[0])}${b[1]}.${b[2]}` : hex(b, b.length));
-    await tryCmd("hardwareRev", CMD.hardwareRevision, (b) => b[0]);
-    await tryCmd("battery", CMD.battery, (b) => ({
-      percent: b[0],
-      charging: b[1] === 0x59, // 0x59 charging, 0x4e idle
-      millivolts: b[2] | (b[3] << 8),
-    }));
-    await tryCmd("status", CMD.status, (b) => hex(b, 8));
-    await tryCmd("deviceInit", CMD.tsDeviceInit, tsToDate);
-    await tryCmd("lastFuelReset", CMD.tsLastFuelReset, tsToDate);
-    await tryCmd("lastGoalReset", CMD.tsLastGoalReset, tsToDate);
-    return info;
+  async function probe() {
+    const results = [];
+    for (const p of PROBES) {
+      try {
+        const { reportId, data } = await exchange(p.cmd);
+        results.push({ ...p, reportId, data });
+      } catch (err) {
+        results.push({ ...p, error: err.message });
+      }
+      await delay(40);
+    }
+    return results;
   }
 
   // ---------- Raw dumps (the reverse-engineering surface) ----------
 
-  // "Desktop data" memory dump — the block Nike's desktop app read.
-  // Protocol: send [0x50,0x37,0x36, off0,off1,off2]; response is
-  // [status, off0,off1,off2, ...data]; loop while status === 0x01.
-  async function dumpDesktopData(maxBytes = 280) {
-    const out = [];
-    let status = 0x01;
-    let offset = [0x00, 0x00, 0x00];
-    let guard = 0;
-    while (status === 0x01 && guard++ < 128) {
-      const d = await command([0x50, 0x37, 0x36, ...offset]);
-      status = d[0];
-      offset = [d[1], d[2], d[3]];
-      for (let i = 4; i < d.length; i++) out.push(d[i]);
-      if (out.length >= maxBytes) break;
+  // "Desktop data" memory read — the block Nike's desktop app read.
+  // libfuelband framing: cmd = [0xbb, 0x50, 0x37, 0x36, offHi, offMid, offLo].
+  // The response header layout is still being confirmed, so this captures each
+  // raw reply chunk (reportId + bytes) and also concatenates a best-effort
+  // payload (skipping a 5-byte header) for the value scan.
+  async function dumpDesktopData(maxIters = 16, headerLen = 5) {
+    const chunks = [];
+    const payload = [];
+    let offset = 0;
+    for (let i = 0; i < maxIters; i++) {
+      const off = [(offset >> 16) & 0xff, (offset >> 8) & 0xff, offset & 0xff];
+      const { reportId, data } = await exchange([0xbb, 0x50, 0x37, 0x36, ...off]);
+      chunks.push({ reportId, data });
+      for (let j = headerLen; j < data.length; j++) payload.push(data[j]);
+      // Without a confirmed continuation flag, advance a fixed window and stop
+      // if the band returns an empty/again-identical chunk.
+      if (!data.length || data.every((x) => x === 0)) break;
+      offset += 0x37;
+      await delay(40);
     }
-    return new Uint8Array(out.slice(0, maxBytes));
+    return { chunks, payload: new Uint8Array(payload) };
   }
 
   // System log — ASCII text the band emits.
-  async function dumpLog(maxIters = 256) {
+  async function dumpLog(maxIters = 64) {
     let text = "";
     for (let i = 0; i < maxIters; i++) {
-      const d = await command([0xf6, 0x00]);
-      if (!d.length) break;
-      text += ascii(d);
+      const { data } = await exchange([0xf6, 0x00]);
+      if (!data.length) break;
+      const s = ascii(data);
+      if (!s) break;
+      text += s;
+      await delay(30);
     }
     return text;
   }
@@ -246,21 +258,17 @@
       : `<div class="dev-row"><span>${label}</span><strong>${value}</strong></div>`;
   }
 
-  function renderInfo(info) {
-    const dateFmt = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
-    const battery = info.battery
-      ? `${info.battery.percent}% ${info.battery.charging ? "⚡ charging" : ""} (${(info.battery.millivolts / 1000).toFixed(2)} V)`
-      : null;
-    $("device-info").innerHTML =
-      row("Model", info.model) +
-      row("Serial", info.serial) +
-      row("Firmware", info.firmware) +
-      row("Hardware rev", info.hardwareRev) +
-      row("Battery", battery) +
-      row("Status flags", info.status && `<code>${info.status}</code>`) +
-      row("First set up", info.deviceInit && dateFmt.format(info.deviceInit)) +
-      row("Last fuel reset", info.lastFuelReset && dateFmt.format(info.lastFuelReset)) +
-      row("Last goal reset", info.lastGoalReset && dateFmt.format(info.lastGoalReset));
+  const bytesHex = (b) => Array.from(b).map((x) => x.toString(16).padStart(2, "0")).join(" ");
+
+  function renderProbe(results) {
+    $("device-info").innerHTML = results
+      .map((r) => {
+        const val = r.error
+          ? `<code>— ${r.error}</code>`
+          : `<code>in#${r.reportId}: ${bytesHex(r.data)} · "${ascii(r.data) || "·"}"</code>`;
+        return `<div class="dev-row"><span>${r.name} [${bytesHex(r.cmd)}]</span>${val}</div>`;
+      })
+      .join("");
   }
 
   function setStatus(text, tone = "muted") {
@@ -281,10 +289,17 @@
       `<pre class="hexdump">${(lastReport || "(no layout captured)").replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]))}</pre>`;
   }
 
-  function renderDump() {
+  const esc = (s) => s.replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
+
+  function renderDump(chunks = []) {
     const lab = $("decode-lab");
+    const rawChunks = chunks
+      .map((c, i) => `chunk ${i} (in#${c.reportId}): ${bytesHex(c.data)}`)
+      .join("\n");
     if (!lastDump || !lastDump.length) {
-      lab.innerHTML = `<p class="device-status">No bytes returned. If the band shows a USB/low-battery icon, charge it fully first, then dump again.</p>`;
+      lab.innerHTML =
+        `<p class="device-status">No payload bytes decoded, but here are the raw replies — send them to me:</p>` +
+        `<pre class="hexdump">${esc(rawChunks || "(no chunks)")}</pre>`;
       return;
     }
     lab.innerHTML = `
@@ -296,7 +311,9 @@
         <span class="device-status" id="scan-result"></span>
       </div>
       <pre class="hexdump" id="hexdump">${hexDump(lastDump)}</pre>
-      <p class="device-status">${lastDump.length} bytes. Read the fuel (or steps) number off the band's display and search for it — a match tells us the offset and width of that field.</p>
+      <p class="device-status">${lastDump.length} payload bytes. Read the fuel (or steps) number off the band's display and search for it — a match tells us the offset and width of that field.</p>
+      <p class="device-status">Raw chunks (send these too if the scan misses):</p>
+      <pre class="hexdump">${esc(rawChunks)}</pre>
     `;
     $("scan-btn").addEventListener("click", () => {
       const target = Number($("scan-target").value);
@@ -311,6 +328,52 @@
         : "No little-endian match. Try steps/calories, or dump again after the value changes.";
       // Highlight is left as plain text; offsets pinpoint the field for us.
     });
+  }
+
+  // Raw command tester — type command bytes (hex), see the raw reply. This is
+  // how we confirm opcodes and response framing against the real band.
+  function renderRawTester() {
+    const el = $("raw-tester");
+    el.hidden = false;
+    el.innerHTML = `
+      <h3>Raw command tester</h3>
+      <div class="lab-scan">
+        <label>Command bytes (hex)
+          <input id="raw-input" type="text" placeholder="e.g. bb 50 37 36 00 00 00" />
+        </label>
+        <button class="btn-ghost" id="raw-send" type="button">Send</button>
+      </div>
+      <div class="raw-presets">
+        <button class="btn-ghost" data-cmd="08" type="button">version 08</button>
+        <button class="btn-ghost" data-cmd="e1" type="button">serial e1</button>
+        <button class="btn-ghost" data-cmd="41" type="button">settings 41</button>
+        <button class="btn-ghost" data-cmd="bb 50 37 36 00 00 00" type="button">mem-read bb 50 37 36</button>
+        <button class="btn-ghost" data-cmd="f6 00" type="button">log f6 00</button>
+      </div>
+      <pre class="hexdump" id="raw-out">Replies appear here.</pre>
+    `;
+    const parse = (s) => s.trim().split(/[\s,]+/).filter(Boolean).map((h) => parseInt(h, 16))
+      .filter((n) => Number.isFinite(n) && n >= 0 && n <= 255);
+    const send = async (bytes) => {
+      const out = $("raw-out");
+      if (!device) { out.textContent = "Not connected."; return; }
+      if (!bytes.length) { out.textContent = "Enter at least one hex byte."; return; }
+      try {
+        const { reportId, data } = await exchange(bytes);
+        out.textContent =
+          `sent (out): ${bytesHex(bytes)}\n` +
+          `reply (in#${reportId}): ${bytesHex(data)}\n` +
+          `ascii: ${ascii(data) || "·"}`;
+      } catch (err) {
+        out.textContent = `sent (out): ${bytesHex(bytes)}\nerror: ${err.message}`;
+      }
+    };
+    $("raw-send").addEventListener("click", () => send(parse($("raw-input").value)));
+    el.querySelectorAll(".raw-presets button").forEach((b) =>
+      b.addEventListener("click", () => {
+        $("raw-input").value = b.dataset.cmd;
+        send(parse(b.dataset.cmd));
+      }));
   }
 
   function init() {
@@ -332,6 +395,8 @@
         btn.textContent = "Connect FuelBand (USB)";
         $("device-info").innerHTML = "";
         $("decode-lab").innerHTML = "";
+        $("raw-tester").innerHTML = "";
+        $("raw-tester").hidden = true;
         $("dump-btn").hidden = true;
         $("log-btn").hidden = true;
         $("diag-btn").hidden = true;
@@ -345,9 +410,10 @@
         const report = prepare();
         console.info("fuelband device report layout:\n" + report);
         lastReport = report;
-        setStatus(`Connected to ${device.productName || "FuelBand"} — reading…`);
-        renderInfo(await readInfo());
-        setStatus("Connected. Use the decode lab below to pull the raw data block off the band — fuel/activity aren't in a documented format yet, so we hunt for them.", "ok");
+        setStatus(`Connected to ${device.productName || "FuelBand"} — probing…`);
+        renderProbe(await probe());
+        renderRawTester();
+        setStatus("Connected. Probe replies are shown above; use the raw tester and data dump below to capture bytes so we can decode the fuel field.", "ok");
         btn.textContent = "Disconnect";
         $("dump-btn").hidden = false;
         $("log-btn").hidden = false;
@@ -362,9 +428,10 @@
       if (!device) return;
       try {
         setStatus("Reading desktop-data block…");
-        lastDump = await dumpDesktopData();
-        renderDump();
-        setStatus(`Dumped ${lastDump.length} bytes. Now search for a number from the band's display.`, "ok");
+        const { chunks, payload } = await dumpDesktopData();
+        lastDump = payload;
+        renderDump(chunks);
+        setStatus(`Captured ${chunks.length} chunk(s), ${payload.length} payload bytes. Search for a number from the band's display.`, "ok");
       } catch (err) {
         setStatus(`Dump failed: ${err.message}`, "err");
         showReport(`Dump failed: ${err.message}. The band's report layout is below — send it to me and I'll tune the transport.`);

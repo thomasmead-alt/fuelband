@@ -64,17 +64,29 @@ Requirements and limits:
 
 ### Decode lab (original band)
 
-Once connected, two buttons appear:
+The transport matches the band's real HID descriptor (confirmed against
+hardware): commands are sent on size-bucketed **output** reports (IDs
+9/10/11/12 for 7/15/31/63-byte payloads) framed as `[length, …command]`, and
+replies arrive as **input** reports (IDs 1/2/3/4) via the `inputreport` event.
+This mirrors the [libfuelband](https://github.com/openyou/libfuelband)
+reference — e.g. the memory read is output report `0x0a` with body
+`07 bb 50 37 36 00 00 00`.
 
-- **Read data dump** pulls the ~280-byte "desktop data" memory block
-  (command `0x50 0x37 0x36`, read iteratively) — the same block Nike's desktop
-  app read — and shows it as a hex/ASCII dump.
-- **Read log** pulls the band's ASCII system log (command `0xf6 0x00`).
+Once connected you get:
+
+- A **probe** panel that fires candidate commands and shows the raw replies.
+- A **raw command tester** — type command bytes in hex (or use the presets)
+  and see the exact reply (report id + bytes + ASCII). This is how opcodes and
+  response framing get confirmed.
+- **Read data dump**, which issues the memory-read command iteratively and
+  captures the raw chunks plus a best-effort payload.
+- **Read log** (`0xf6 0x00`) for the band's ASCII system log.
+- **Diagnostics**, which prints the band's report layout.
 
 To locate the fuel field, read a number off the band's own display (fuel,
 steps, or calories) and type it into **"Value shown on the band."** The lab
-scans the dump for that number encoded little-endian as a 2-, 3-, or 4-byte
-word and reports the offset and width of any match. Repeat as the number
+scans the captured bytes for that number encoded little-endian as a 2-, 3-, or
+4-byte word and reports the offset and width of any match. Repeat as the number
 changes to confirm the field. That offset is the missing piece the original
 reverse-engineers never nailed down — and it needs a physical band to find.
 

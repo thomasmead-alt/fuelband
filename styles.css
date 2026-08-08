@@ -172,6 +172,20 @@ body {
 
 .device-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
+/* Raw tester */
+.raw-tester { margin-top: 14px; }
+.raw-tester h3 {
+  margin: 0 0 10px; font-size: 12px; font-weight: 600;
+  letter-spacing: 1px; text-transform: uppercase; color: var(--ink-secondary);
+}
+.raw-tester input {
+  background: var(--surface-0); border: 1px solid var(--baseline);
+  border-radius: 8px; color: var(--ink-primary);
+  padding: 9px 10px; font-size: 14px; width: 260px; max-width: 100%;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+}
+.raw-presets { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 10px; }
+
 /* Decode lab */
 .decode-lab:empty { display: none; }
 .decode-lab { margin-top: 14px; }
