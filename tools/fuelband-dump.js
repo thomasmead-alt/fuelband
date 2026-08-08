@@ -105,6 +105,50 @@ async function identity(dev) {
   if (ser) console.log(`serial:   ${ascii(ser)}`);
 }
 
+function decodeTs(d) {
+  if (!d || d.length < 4) return "";
+  const t = (d[0] | (d[1] << 8) | (d[2] << 16) | (d[3] << 24)) >>> 0;
+  if (!t || t === 0xffffffff) return "unset";
+  try { return new Date(t * 1000).toISOString(); } catch { return `raw ${t}`; }
+}
+
+// Read a command through BOTH working framings and show what each returns.
+async function readBoth(dev, cmd) {
+  const s = await readSystem(dev, cmd);   // system family (07-tagged), reply feat#1
+  const d = await readData(dev, cmd);     // data family, reply feat#4
+  return { s, d: d ? d.slice(3) : null }; // strip [id,len,op] from data reply
+}
+
+// Read-only baseline: everything we can learn about the band's current state
+// before attempting any writes. Purely reads — safe to run repeatedly.
+async function recon(dev) {
+  console.log("\n=== RECON (read-only baseline) ===");
+  await identity(dev);
+
+  const READS = {
+    "protocol 60": [0x60],
+    "network 06": [0x06],
+    "status df": [0xdf],
+    "battery 13": [0x13],
+    "model e0": [0xe0],
+    "hw-rev e2": [0xe2],
+    "init-ts 42 01": [0x42, 0x01],
+    "assess-ts 42 02": [0x42, 0x02],
+    "fuelreset-ts 42 03": [0x42, 0x03],
+    "goalreset-ts 42 04": [0x42, 0x04],
+  };
+  console.log("\nfield: system-reply | data-reply");
+  for (const [name, cmd] of Object.entries(READS)) {
+    const { s, d } = await readBoth(dev, cmd);
+    const tsNote = cmd[0] === 0x42 ? `  ts(sys)=${decodeTs(s)} ts(data)=${decodeTs(d)}` : "";
+    console.log(`  ${name.padEnd(16)}: sys[${s ? hex(s) : "-"}] | data[${d ? hex(d) : "-"}]${tsNote}`);
+  }
+
+  console.log("\naccount region (43 19), paged:");
+  const acct = await readAccountRegion(dev);
+  console.log("  bytes:", hex(acct) || "(none)");
+}
+
 // Read the 0x43 0x19 account region, paging by 0x37 until a short reply.
 async function readAccountRegion(dev) {
   const collected = [];
@@ -251,7 +295,9 @@ async function dumpMemory(dev, maxBytes = 320) {
   dev.on("error", (e) => console.error("device error:", e.message));
   try {
     const findIdx = process.argv.indexOf("--find");
-    if (findIdx !== -1) {
+    if (process.argv.includes("--recon")) {
+      await recon(dev);
+    } else if (findIdx !== -1) {
       const target = Number(process.argv[findIdx + 1]);
       if (!Number.isFinite(target)) { console.error("Usage: node fuelband-dump.js --find <number>"); }
       else await find(dev, target);
