@@ -143,6 +143,48 @@ function frameData(cmd) { // plain data framing, bucket-aware
 }
 function outWrite(dev, buf) { dev.write(buf); } // output report
 
+// CRC-16/XMODEM (poly 0x1021, init 0) — the config-block CRC.
+function crc16xmodem(bytes) {
+  let crc = 0;
+  for (const b of bytes) {
+    crc ^= (b << 8);
+    for (let i = 0; i < 8; i++) crc = (crc & 0x8000) ? ((crc << 1) ^ 0x1021) & 0xffff : (crc << 1) & 0xffff;
+  }
+  return crc & 0xffff;
+}
+
+// Read the config block via 0x51 (get desktop data). Tries a no-arg read and a
+// paged read (offset like the memory dump), dumping raw replies so we can see
+// the real DesktopOptions blob and its framing.
+async function readConfig(dev) {
+  console.log("\n=== READ CONFIG (0x51 get desktop data) ===");
+  // No-arg, both framings, as output reports.
+  for (const [name, frame] of [["data", frameData([0x51])], ["07", frameSys([0x51])]]) {
+    outWrite(dev, frame);
+    await delay(100);
+    const r4 = tryRead(dev, 4), r1 = tryRead(dev, 1);
+    console.log(`0x51 no-arg (${name}): feat#4[${r4.error ? r4.error : hex(r4.data)}] feat#1[${r1.error ? r1.error : hex(r1.data)}]`);
+  }
+  // Paged read with a 3-byte offset (mem-dump style).
+  console.log("paged (0x51 + offset):");
+  const all = [];
+  let offset = 0;
+  for (let i = 0; i < 24; i++) {
+    const off = [(offset >> 16) & 0xff, (offset >> 8) & 0xff, offset & 0xff];
+    outWrite(dev, frameData([0x51, ...off]));
+    await delay(70);
+    const r = tryRead(dev, 4);
+    if (r.error || !r.data) { console.log(`  @${offset}: ${r.error || "no data"}`); break; }
+    console.log(`  @${offset}: ${hex(r.data)}`);
+    const len = r.data[1];
+    if (!r.data.length || r.data.length < 7) break;
+    for (let j = 7; j < r.data.length; j++) all.push(r.data[j]);
+    if (len !== 0x3d) break;
+    offset += 0x37;
+  }
+  if (all.length) console.log(`assembled ${all.length} bytes: ${hex(all)}`);
+}
+
 // SET CLOCK — reproduces the official app's doTime (FuelBandCommands.cc):
 // opcode 0x31, payload = time(4B big-endian unix) + gmtOffset(4B big-endian
 // seconds) + dstOffsetMinutes(1B). This is the initialization the band waits
@@ -379,7 +421,10 @@ async function dumpMemory(dev, maxBytes = 320) {
   dev.on("error", (e) => console.error("device error:", e.message));
   try {
     const findIdx = process.argv.indexOf("--find");
-    if (process.argv.includes("--set-clock")) {
+    if (process.argv.includes("--read-config")) {
+      await identity(dev);
+      await readConfig(dev);
+    } else if (process.argv.includes("--set-clock")) {
       await identity(dev);
       await setClock(dev);
     } else if (process.argv.includes("--recon")) {
