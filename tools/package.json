@@ -1,0 +1,14 @@
+{
+  "name": "fuelband-tools",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Native USB probe/dump for the original Nike+ FuelBand via hidapi",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node fuelband-dump.js",
+    "dump": "node fuelband-dump.js --dump"
+  },
+  "dependencies": {
+    "node-hid": "^3.1.2"
+  }
+}
