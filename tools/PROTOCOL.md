@@ -59,10 +59,56 @@ So a full set-clock command body is `31 tt tt tt tt gg gg gg gg dd`. The
 current time. Setting the clock is what the official app does first on a fresh
 band; after that the band starts keeping time and tracking fuel.
 
-## Config block & save
+## Transport detail: OUTPUT reports
+
+Commands are sent as **output reports** (`HidD_SetOutputReport`), not feature
+reports — the DLL's send path sets report type 2. In node-hid that's
+`device.write([reportId, …])`. Responses are read with `HidD_GetFeature`
+(`device.getFeatureReport`). Feature-writes are tolerated for read-only
+queries but state changes must be output reports.
+
+## Config block (`DesktopOptions`) format
+
+Read via `0x51`, written via `0x52`. Binary layout (from `DesktopOptions.cc`
+parse at 0x100331F0):
+
+```
+[4-byte header][payload …][2-byte CRC, big-endian]
+```
+
+- Minimum total length 6. The 4-byte header is **not** covered by the CRC.
+- CRC is over the payload bytes only; the stored CRC is the last 2 bytes, big-endian.
+- Payload carries the profile/options fields logged by the parser:
+  `imprint_state` (u32), goal, birthdate, band name, metric weight, metric
+  height, `clock auto set`, `profile_update_date`, plus the display options.
+
+### CRC-16/XMODEM
+
+Confirmed poly `0x1021`, init `0x0000`, MSB-first, no reflection, no final xor
+(table at 0x1005c700, update `crc = (crc<<8) ^ table[(crc>>8) ^ byte]`):
+
+```js
+function crc16xmodem(bytes) {
+  let crc = 0;
+  for (const b of bytes) {
+    crc ^= (b << 8);
+    for (let i = 0; i < 8; i++) crc = (crc & 0x8000) ? ((crc << 1) ^ 0x1021) & 0xffff : (crc << 1) & 0xffff;
+  }
+  return crc & 0xffff;
+}
+```
+
+## Save
 
 `option-*` commands (0x32–0x3B) set individual display/profile options; the
-`get/set desktop data` commands (0x51/0x52) read and write the whole
-`DesktopOptions` config blob (which carries a CRC — see `DesktopOptions.cc`).
-A `save` command flushes programmable parameters to flash. Full profile setup
-(goal, units, 24-hour, etc.) uses these; minimal wake-up just needs the clock.
+`get/set desktop data` commands (0x51/0x52) read/write the whole config blob
+above. A `save` command flushes programmable parameters to flash.
+
+## Initialization status (open)
+
+A factory band shows "connect to USB" until it is **imprinted**. Setting the
+clock (0x31) is acknowledged by the band but does not by itself leave that
+screen. Imprinting requires writing a valid `DesktopOptions` blob (with
+`imprint_state` set and a correct CRC) via `0x52` and issuing `save` — the
+remaining reverse-engineering work is reconstructing the exact payload field
+layout the app writes (serializer at 0x10032c20).
