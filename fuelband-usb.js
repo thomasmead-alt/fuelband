@@ -14,7 +14,13 @@
 
   const VENDOR_ID = 0x11ac;   // Nike
   const PRODUCT_ID = 0x6565;  // FuelBand (non-SE)
-  const REPORT_ID = 0x01;
+
+  // The python reference assumed report ID 0x01 / 64-byte feature reports, but
+  // the real descriptor may differ and WebHID validates strictly against it.
+  // These are discovered from device.collections on connect (see prepare()).
+  let REPORT_ID = 0x01;       // feature/output report id actually used
+  let USE_INPUT_REPLY = false; // true if replies arrive as input reports
+  const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
   const CMD = {
     firmwareVersion: [0x08],
@@ -50,21 +56,81 @@
     device = null;
   }
 
-  // Send [len+1, 0x07, ...cmd] as feature report 0x01, then read the reply.
+  // Inspect the HID report descriptor WebHID exposes and pick sane defaults.
+  // Prefers a feature report id shared by send+receive; otherwise falls back to
+  // output-for-send / input-for-reply.
+  function prepare() {
+    const collections = device.collections || [];
+    const feature = [], input = [], output = [];
+    for (const c of collections) {
+      for (const r of c.featureReports || []) feature.push(r.reportId);
+      for (const r of c.inputReports || []) input.push(r.reportId);
+      for (const r of c.outputReports || []) output.push(r.reportId);
+    }
+    if (feature.length) {
+      REPORT_ID = feature[0] ?? 0x01;
+      USE_INPUT_REPLY = false;
+    } else if (output.length || input.length) {
+      REPORT_ID = output[0] ?? input[0] ?? 0x00;
+      USE_INPUT_REPLY = true;
+    }
+    return describe();
+  }
+
+  function describe() {
+    const collections = device?.collections || [];
+    const lines = [];
+    lines.push(`product: ${device.productName || "(unknown)"}  vid:${(device.vendorId||0).toString(16)} pid:${(device.productId||0).toString(16)}`);
+    collections.forEach((c, ci) => {
+      const fmt = (r) => `id ${r.reportId} (${(r.items || []).reduce((n, it) => n + ((it.reportCount || 0) * (it.reportSize || 0)) / 8, 0)}B)`;
+      lines.push(`collection ${ci} usagePage:${c.usagePage} usage:${c.usage}`);
+      if (c.featureReports?.length) lines.push(`  feature: ${c.featureReports.map(fmt).join(", ")}`);
+      if (c.inputReports?.length) lines.push(`  input:   ${c.inputReports.map(fmt).join(", ")}`);
+      if (c.outputReports?.length) lines.push(`  output:  ${c.outputReports.map(fmt).join(", ")}`);
+    });
+    lines.push(`chosen: reportId ${REPORT_ID}, reply via ${USE_INPUT_REPLY ? "input report" : "feature report"}`);
+    return lines.join("\n");
+  }
+
+  // Send [len+1, 0x07, ...cmd], then read the reply. Tries the discovered
+  // report id and mechanism, with fallbacks, since the exact framing can only
+  // be confirmed against real hardware.
   async function command(cmd) {
     if (!device?.opened) throw new Error("Not connected.");
     const payload = new Uint8Array(2 + cmd.length);
     payload[0] = cmd.length + 1;
     payload[1] = 0x07;
     payload.set(cmd, 2);
+
+    const strip = (view) => {
+      let bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+      if (bytes[0] === REPORT_ID && REPORT_ID !== 0) bytes = bytes.subarray(1);
+      return bytes.subarray(2); // skip [len, tag]
+    };
+
+    if (USE_INPUT_REPLY) {
+      const reply = new Promise((resolve, reject) => {
+        const onInput = (e) => { cleanup(); resolve(strip(e.data)); };
+        const timer = setTimeout(() => { cleanup(); reject(new Error("No reply (input report timed out)")); }, 1500);
+        const cleanup = () => { clearTimeout(timer); device.removeEventListener("inputreport", onInput); };
+        device.addEventListener("inputreport", onInput);
+      });
+      await device.sendReport(REPORT_ID, payload);
+      return reply;
+    }
+
+    // Feature-report request/response. Retry the receive with report id 0 if the
+    // discovered id is rejected by the browser.
     await device.sendFeatureReport(REPORT_ID, payload);
-    const view = await device.receiveFeatureReport(REPORT_ID);
-    let bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
-    // Chrome includes the report ID as the first byte of a received feature
-    // report; the python reference parses [id, len, tag, ...data]. Handle
-    // both shapes by locating the 0x07/​response tag header defensively.
-    if (bytes[0] === REPORT_ID) bytes = bytes.subarray(1);
-    return bytes.subarray(2); // skip [len, tag]
+    await delay(30);
+    try {
+      return strip(await device.receiveFeatureReport(REPORT_ID));
+    } catch (err) {
+      if (REPORT_ID !== 0) {
+        return strip(await device.receiveFeatureReport(0));
+      }
+      throw err;
+    }
   }
 
   const ascii = (b) =>
@@ -205,7 +271,15 @@
 
   // ---------- Decode lab ----------
 
-  let lastDump = null; // Uint8Array of the most recent desktop-data dump
+  let lastDump = null;   // Uint8Array of the most recent desktop-data dump
+  let lastReport = "";   // human-readable device report layout from prepare()
+
+  function showReport(extra) {
+    $("decode-lab").innerHTML =
+      (extra ? `<p class="device-status" data-tone="err">${extra}</p>` : "") +
+      `<p class="device-status">Device report layout — copy this back so the transport can be tuned:</p>` +
+      `<pre class="hexdump">${(lastReport || "(no layout captured)").replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]))}</pre>`;
+  }
 
   function renderDump() {
     const lab = $("decode-lab");
@@ -260,6 +334,7 @@
         $("decode-lab").innerHTML = "";
         $("dump-btn").hidden = true;
         $("log-btn").hidden = true;
+        $("diag-btn").hidden = true;
         lastDump = null;
         setStatus("Disconnected.");
         return;
@@ -267,12 +342,16 @@
       try {
         setStatus("Requesting device…");
         await connect();
+        const report = prepare();
+        console.info("fuelband device report layout:\n" + report);
+        lastReport = report;
         setStatus(`Connected to ${device.productName || "FuelBand"} — reading…`);
         renderInfo(await readInfo());
         setStatus("Connected. Use the decode lab below to pull the raw data block off the band — fuel/activity aren't in a documented format yet, so we hunt for them.", "ok");
         btn.textContent = "Disconnect";
         $("dump-btn").hidden = false;
         $("log-btn").hidden = false;
+        $("diag-btn").hidden = false;
       } catch (err) {
         await disconnect().catch(() => {});
         setStatus(`Connection failed: ${err.message}`, "err");
@@ -288,8 +367,11 @@
         setStatus(`Dumped ${lastDump.length} bytes. Now search for a number from the band's display.`, "ok");
       } catch (err) {
         setStatus(`Dump failed: ${err.message}`, "err");
+        showReport(`Dump failed: ${err.message}. The band's report layout is below — send it to me and I'll tune the transport.`);
       }
     });
+
+    $("diag-btn").addEventListener("click", () => showReport());
 
     $("log-btn").addEventListener("click", async () => {
       if (!device) return;
@@ -310,6 +392,7 @@
         btn.textContent = "Connect FuelBand (USB)";
         $("dump-btn").hidden = true;
         $("log-btn").hidden = true;
+        $("diag-btn").hidden = true;
         setStatus("Device unplugged.");
       }
     });
