@@ -384,6 +384,57 @@ async function writeTest(dev) {
     : "\nTest pattern did not read back; the write needs a different structure (offset/prefix). Raw bytes above will tell us what to adjust.");
 }
 
+// Chunked desktop write in the app's structure: each chunk is
+// [0x51, moreFlag, off(3 BE), 0x83, 0xa2, ...data], offset = cumulative data
+// bytes sent (moreFlag = 1 once offset > 0).
+async function chunkedWriteDesktop(dev, blob, dataPerChunk = 48) {
+  let offset = 0;
+  const replies = [];
+  while (offset < blob.length) {
+    const moreFlag = offset > 0 ? 1 : 0;
+    const off3 = [(offset >> 16) & 0xff, (offset >> 8) & 0xff, offset & 0xff];
+    const chunk = blob.slice(offset, offset + dataPerChunk);
+    const cmd = [0x51, moreFlag, ...off3, 0x83, 0xa2, ...chunk];
+    outWrite(dev, frameData(cmd));
+    await delay(80);
+    const r = tryRead(dev, 4);
+    replies.push(r.data ? hex(r.data).slice(0, 14) : "-");
+    offset += chunk.length;
+  }
+  return replies;
+}
+
+// Full imprint via chunked write + read-back verification.
+async function imprint2(dev) {
+  console.log("\n=== IMPRINT v2 (chunked write, read-back + status verified) ===");
+  const base = await imprintedBit(dev);
+  const dumpFront = async () => {
+    const parts = [];
+    for (let off = 0; off < 120; off += 0x37) {
+      const r = await readDesktop(dev, off);
+      parts.push(...Array.prototype.slice.call(r, 7));
+    }
+    return parts;
+  };
+  console.log(`baseline imprinted=${base.bit}; region head: ${hex((await dumpFront()).slice(0, 24))}`);
+
+  for (const val of [0x00000001, 0x000000ff, 0xffffffff]) {
+    const blob = buildConfigBlob(val, { clockAutoSet: 1 });
+    console.log(`\n-- imprint_state=0x${val.toString(16).padStart(8, "0")} blob=${blob.length}B, writing ${Math.ceil(blob.length / 48)} chunks --`);
+    const replies = await chunkedWriteDesktop(dev, blob);
+    console.log(`  chunk replies: ${replies.join(" | ")}`);
+    await delay(200);
+    const head = (await dumpFront());
+    console.log(`  region head after: ${hex(head.slice(0, 24))}`);
+    const committed = head.slice(0, blob.length).some((b, i) => b === blob[i] && b !== 0xff);
+    const after = await imprintedBit(dev);
+    console.log(`  imprinted=${after.bit}  ${committed ? "(region CHANGED — write committed!)" : "(region still FF — not committed)"}`);
+    if (after.bit === 1) { console.log(`\n  *** IMPRINTED with 0x${val.toString(16)} ***`); return; }
+    if (committed) { console.log("  write landed but didn't imprint — likely need save or a different imprint_state. Big progress."); return; }
+  }
+  console.log("\nNothing committed. The blob format/CRC is likely being rejected — read-back is our oracle to fix it.");
+}
+
 async function imprintedBit(dev) {
   const s = await readSystem(dev, [0xdf]);
   return { raw: s, bit: s && s.length ? (s[0] & 1) : null };
@@ -689,6 +740,9 @@ async function dumpMemory(dev, maxBytes = 320) {
       const length = parseInt(process.argv[ai + 2] || "400", 16);
       await identity(dev);
       await readMem(dev, start, length);
+    } else if (process.argv.includes("--imprint2")) {
+      await identity(dev);
+      await imprint2(dev);
     } else if (process.argv.includes("--writetest2")) {
       await identity(dev);
       await writeTest2(dev);
