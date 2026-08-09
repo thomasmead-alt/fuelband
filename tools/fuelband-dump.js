@@ -337,6 +337,36 @@ async function writeDesktop(dev, offset, data) {
   return r.data || [];
 }
 
+// Try several write structures (the app uses a 0x83 0xa2 write marker via the
+// chunked transfer), reading back via 0x51 50 37 36 after each to see which sticks.
+async function writeTest2(dev) {
+  console.log("\n=== WRITE STRUCTURE SEARCH (read-back verified) ===");
+  const b3 = (o) => [(o >> 16) & 0xff, (o >> 8) & 0xff, o & 0xff];
+  const structs = [
+    ["W1 op51 flag+off3 +83a2", (o, d) => [0x51, 0, ...b3(o), 0x83, 0xa2, ...d]],
+    ["W2 op51 83a2 +off3",      (o, d) => [0x51, 0x83, 0xa2, ...b3(o), ...d]],
+    ["W3 op51 P76 +off3 +83a2", (o, d) => [0x51, 0x50, 0x37, 0x36, ...b3(o), 0x83, 0xa2, ...d]],
+    ["W4 op52 flag+off3 +83a2", (o, d) => [0x52, 0, ...b3(o), 0x83, 0xa2, ...d]],
+    ["W5 op52 P76 +off3 +83a2", (o, d) => [0x52, 0x50, 0x37, 0x36, ...b3(o), 0x83, 0xa2, ...d]],
+    ["W6 op51 83a2 P76 +off3",  (o, d) => [0x51, 0x83, 0xa2, 0x50, 0x37, 0x36, ...b3(o), ...d]],
+  ];
+  const test = [0xaa, 0xbb, 0xcc, 0xdd, 0x11, 0x22, 0x33, 0x44];
+  const testHex = hex(test);
+  for (const [name, mk] of structs) {
+    const cmd = mk(0, test);
+    outWrite(dev, frameData(cmd));
+    await delay(90);
+    const wr = tryRead(dev, 4);
+    await delay(130);
+    const back = await readDesktop(dev, 0);
+    const data = Array.prototype.slice.call(back, 7, 7 + test.length);
+    const stuck = hex(data) === testHex;
+    console.log(`${name}\n    sent: ${hex(cmd)}\n    wrReply: ${hex(wr.data || [])}\n    readback@0: ${hex(data)}  ${stuck ? "*** STUCK ***" : ""}`);
+  }
+  console.log("\nAny '*** STUCK ***' line = that's the write structure. If none, the writes");
+  console.log("may reply/commit via the unreadable channel or need save — next step from the bytes.");
+}
+
 // Critical test: can we write to the desktop region and read it back?
 async function writeTest(dev) {
   console.log("\n=== WRITE TEST (0x52 50 37 36) with read-back ===");
@@ -659,6 +689,9 @@ async function dumpMemory(dev, maxBytes = 320) {
       const length = parseInt(process.argv[ai + 2] || "400", 16);
       await identity(dev);
       await readMem(dev, start, length);
+    } else if (process.argv.includes("--writetest2")) {
+      await identity(dev);
+      await writeTest2(dev);
     } else if (process.argv.includes("--writetest")) {
       await identity(dev);
       await writeTest(dev);
