@@ -221,7 +221,7 @@ async function memSweep(dev, maxBytes = 32768) {
     const r = await readData(dev, [0xbb, 0x50, 0x37, 0x36, ...off]);
     if (!r || r.length < 8) { console.log(`stopped @${offset}: short/no reply (${r ? hex(r) : "none"})`); break; }
     const status = r[3];
-    const data = r.subarray(7);
+    const data = Array.prototype.slice.call(r, 7);
     for (const b of data) { all.push(b); if (b !== 0xff) nonFF++; }
     // report any non-FF chunk immediately
     if (data.some((b) => b !== 0xff)) {
