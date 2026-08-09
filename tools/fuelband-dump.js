@@ -275,6 +275,49 @@ async function readMem(dev, start, length, outFile = "fuelband-mem.bin") {
   }
 }
 
+// Fuzz the desktop-write framing. A command the band PROCESSES replies with
+// length > 1 (like the working mem read: 01 3d bb ...); one it ignores replies
+// 01 01 <opcode> (echo). We sweep structure variants with a short test payload
+// and flag any that engage. Safe: only opcode 0x51 (the known desktop-write op).
+async function fuzzWrite(dev) {
+  console.log("\n=== FUZZ desktop-write framing (looking for engagement) ===");
+  const test = [0xde, 0xad, 0xbe, 0xef]; // short probe payload
+  const prefixes = {
+    "none": [],
+    "83a2": [0x83, 0xa2],
+    "P76": [0x50, 0x37, 0x36],
+    "83a2+P76": [0x83, 0xa2, 0x50, 0x37, 0x36],
+  };
+  const headers = {
+    "none": [],
+    "flag+off3": [0x00, 0x00, 0x00, 0x00],
+    "off3": [0x00, 0x00, 0x00],
+    "len": [4 + 9], // a length-ish byte
+  };
+  const frames = { "data": frameData, "07": frameSys };
+  let engaged = [];
+  for (const opcode of [0x51, 0x52]) {
+    for (const [pn, pre] of Object.entries(prefixes)) {
+      for (const [hn, hdr] of Object.entries(headers)) {
+        for (const [fn, frame] of Object.entries(frames)) {
+          const cmd = [opcode, ...hdr, ...pre, ...test];
+          outWrite(dev, frame(cmd));
+          await delay(40);
+          const r4 = tryRead(dev, 4), r1 = tryRead(dev, 1);
+          const rep = r4.data && r4.data.length ? r4.data : (r1.data || []);
+          const len = rep[1] ?? 0;
+          const eng = len > 1;
+          const tag = `op${opcode.toString(16)} pre:${pn} hdr:${hn} ${fn}`;
+          if (eng) { engaged.push(tag); console.log(`  ENGAGED  ${tag}  -> ${hex(rep)}`); }
+        }
+      }
+    }
+  }
+  console.log(engaged.length
+    ? `\n${engaged.length} variant(s) engaged — that's the write framing. Next: send the real blob that way.`
+    : "\nNothing engaged. The desktop write likely replies over the unreadable channel, so we can't confirm it this way.");
+}
+
 async function imprintedBit(dev) {
   const s = await readSystem(dev, [0xdf]);
   return { raw: s, bit: s && s.length ? (s[0] & 1) : null };
@@ -580,6 +623,9 @@ async function dumpMemory(dev, maxBytes = 320) {
       const length = parseInt(process.argv[ai + 2] || "400", 16);
       await identity(dev);
       await readMem(dev, start, length);
+    } else if (process.argv.includes("--fuzz")) {
+      await identity(dev);
+      await fuzzWrite(dev);
     } else if (process.argv.includes("--memsweep")) {
       await identity(dev);
       await memSweep(dev);
