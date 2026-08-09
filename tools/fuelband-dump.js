@@ -318,6 +318,42 @@ async function fuzzWrite(dev) {
     : "\nNothing engaged. The desktop write likely replies over the unreadable channel, so we can't confirm it this way.");
 }
 
+// Read desktop region at an offset: 0x51 50 37 36 + off(3 BE); reply
+// [01,len,51,status,off(3),...data]. Returns the data bytes.
+async function readDesktop(dev, offset) {
+  const o = [(offset >> 16) & 0xff, (offset >> 8) & 0xff, offset & 0xff];
+  outWrite(dev, frameData([0x51, 0x50, 0x37, 0x36, ...o]));
+  await delay(60);
+  const r = tryRead(dev, 4);
+  return r.data || [];
+}
+
+// Write bytes to desktop region: 0x52 50 37 36 + off(3 BE) + data.
+async function writeDesktop(dev, offset, data) {
+  const o = [(offset >> 16) & 0xff, (offset >> 8) & 0xff, offset & 0xff];
+  outWrite(dev, frameData([0x52, 0x50, 0x37, 0x36, ...o, ...data]));
+  await delay(80);
+  const r = tryRead(dev, 4);
+  return r.data || [];
+}
+
+// Critical test: can we write to the desktop region and read it back?
+async function writeTest(dev) {
+  console.log("\n=== WRITE TEST (0x52 50 37 36) with read-back ===");
+  console.log(`before @0: ${hex(await readDesktop(dev, 0))}`);
+  const test = [0xaa, 0xbb, 0xcc, 0xdd, 0x11, 0x22, 0x33, 0x44];
+  const wr = await writeDesktop(dev, 0, test);
+  console.log(`write reply: ${hex(wr)}`);
+  await delay(150);
+  const after = await readDesktop(dev, 0);
+  console.log(`after  @0: ${hex(after)}`);
+  const dataAfter = Array.prototype.slice.call(after, 7, 7 + test.length);
+  const stuck = hex(dataAfter) === hex(test);
+  console.log(stuck
+    ? "\n*** WRITE VERIFIED — the test pattern read back. We can write the desktop region. ***"
+    : "\nTest pattern did not read back; the write needs a different structure (offset/prefix). Raw bytes above will tell us what to adjust.");
+}
+
 async function imprintedBit(dev) {
   const s = await readSystem(dev, [0xdf]);
   return { raw: s, bit: s && s.length ? (s[0] & 1) : null };
@@ -623,6 +659,9 @@ async function dumpMemory(dev, maxBytes = 320) {
       const length = parseInt(process.argv[ai + 2] || "400", 16);
       await identity(dev);
       await readMem(dev, start, length);
+    } else if (process.argv.includes("--writetest")) {
+      await identity(dev);
+      await writeTest(dev);
     } else if (process.argv.includes("--fuzz")) {
       await identity(dev);
       await fuzzWrite(dev);
