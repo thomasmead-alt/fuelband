@@ -172,6 +172,74 @@ function crc16xmodem(bytes) {
   return crc & 0xffff;
 }
 
+// Build a best-effort DesktopOptions config blob:
+//   [4-byte header=0][DIN 48][UDI 48][device-group-config-id 48][imprint_state TLV][CRC-16 BE]
+// CRC-16/XMODEM over the payload (everything after the 4-byte header, excluding CRC).
+function buildConfigBlob(imprintState, opts = {}) {
+  const payload = [];
+  const field = (n) => { for (let i = 0; i < n; i++) payload.push(0); };
+  field(48); field(48); field(48);                 // DIN, UDI, device group config id (empty)
+  // imprint_state: tag 0x000b, len 4, value big-endian
+  payload.push(0x00, 0x0b, 0x04,
+    (imprintState >>> 24) & 0xff, (imprintState >>> 16) & 0xff, (imprintState >>> 8) & 0xff, imprintState & 0xff);
+  if (opts.clockAutoSet !== undefined) payload.push(0x00, 0x0e, 0x01, opts.clockAutoSet & 0xff);
+  const crc = crc16xmodem(payload);
+  return [0, 0, 0, 0, ...payload, (crc >> 8) & 0xff, crc & 0xff];
+}
+
+// Chunked set-desktop-data write (opcode 0x51). Data stream = [0x83,0xa2] + blob.
+// Each chunk: [0x51, moreFlag, offHi, offMid, offLo, ...<=55 data], data-family
+// framed as an output report; reply read on feat#4.
+async function writeDesktopData(dev, blob, verbose = false) {
+  const stream = [0x83, 0xa2, ...blob];
+  const acks = [];
+  let offset = 0;
+  while (offset < stream.length) {
+    const moreFlag = offset > 0 ? 1 : 0;
+    const header = [moreFlag, (offset >> 16) & 0xff, (offset >> 8) & 0xff, offset & 0xff];
+    const chunk = stream.slice(offset, offset + 55);
+    const cmd = [0x51, ...header, ...chunk];
+    outWrite(dev, frameData(cmd));
+    await delay(70);
+    const r = tryRead(dev, 4);
+    acks.push(r.error ? r.error : hex(r.data));
+    if (verbose) console.log(`    chunk @${offset} (${chunk.length}B) ack: ${r.error || hex(r.data)}`);
+    offset += chunk.length;
+  }
+  return acks;
+}
+
+async function imprintedBit(dev) {
+  const s = await readSystem(dev, [0xdf]);
+  return { raw: s, bit: s && s.length ? (s[0] & 1) : null };
+}
+
+// Brute-force imprint: sweep candidate imprint_state values, writing the config
+// blob and checking whether the readable imprinted bit flips.
+async function imprint(dev) {
+  console.log("\n=== IMPRINT ATTEMPT (brute force, verified via status bit) ===");
+  const base = await imprintedBit(dev);
+  console.log(`baseline status: ${base.raw ? hex(base.raw) : "-"}  imprinted=${base.bit}`);
+
+  const candidates = [0x00000001, 0x00000003, 0x0000000f, 0x000000ff, 0x0000ffff,
+                      0xffffffff, 0x00000002, 0x00010000, 0x01000000, 0x7fffffff];
+  for (const val of candidates) {
+    const blob = buildConfigBlob(val, { clockAutoSet: 1 });
+    console.log(`\n-- imprint_state=0x${val.toString(16).padStart(8, "0")}  blob=${blob.length}B --`);
+    const acks = await writeDesktopData(dev, blob);
+    console.log(`  write chunk acks: ${acks.join(" | ")}`);
+    await delay(150);
+    const after = await imprintedBit(dev);
+    console.log(`  status after: ${after.raw ? hex(after.raw) : "-"}  imprinted=${after.bit}`);
+    if (after.bit === 1) { console.log(`\n  *** IMPRINTED with imprint_state=0x${val.toString(16)} ***`); return; }
+    if (after.raw && base.raw && hex(after.raw) !== hex(base.raw)) {
+      console.log("  (status bytes CHANGED — the write is affecting device state)");
+    }
+  }
+  console.log("\nNo value flipped the imprinted bit. If the status bytes never changed, the write");
+  console.log("isn't landing (framing/save needed); if they changed, we're close — refine from here.");
+}
+
 // Read the config block via 0x51 (get desktop data). Tries a no-arg read and a
 // paged read (offset like the memory dump), dumping raw replies so we can see
 // the real DesktopOptions blob and its framing.
@@ -440,7 +508,10 @@ async function dumpMemory(dev, maxBytes = 320) {
   dev.on("error", (e) => console.error("device error:", e.message));
   try {
     const findIdx = process.argv.indexOf("--find");
-    if (process.argv.includes("--status")) {
+    if (process.argv.includes("--imprint")) {
+      await identity(dev);
+      await imprint(dev);
+    } else if (process.argv.includes("--status")) {
       await identity(dev);
       await readStatus(dev);
     } else if (process.argv.includes("--read-config")) {
