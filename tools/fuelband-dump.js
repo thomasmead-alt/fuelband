@@ -240,6 +240,41 @@ async function memSweep(dev, maxBytes = 32768) {
   }
 }
 
+// Read the band's memory via read-memory-int (0x19): request = [0x19, addr(3 BE)];
+// reply (data-family) = [01, len, 0x19, flag, addr(3), ...data]. Dumps [start,start+length)
+// and saves it, printing the first few raw replies so we can confirm the structure.
+async function readMem(dev, start, length, outFile = "fuelband-mem.bin") {
+  console.log(`\n=== READ MEMORY (0x19) 0x${start.toString(16)}..0x${(start + length).toString(16)} ===`);
+  const out = [];
+  let addr = start, iters = 0, printed = 0;
+  const end = start + length;
+  while (addr < end && iters < 4000) {
+    const req = [0x19, (addr >> 16) & 0xff, (addr >> 8) & 0xff, addr & 0xff];
+    outWrite(dev, frameData(req));
+    await delay(45);
+    const r = tryRead(dev, 4);
+    if (!r || !r.data || r.data.length < 8) {
+      console.log(`@0x${addr.toString(16)}: short/no reply (${r && r.data ? hex(r.data) : "none"})`);
+      break;
+    }
+    const reply = r.data;               // [01, len, 19, flag, a2, a1, a0, ...data]
+    if (printed < 4) { console.log(`@0x${addr.toString(16)}: ${hex(reply)}`); printed++; }
+    if (reply[2] !== 0x19) { console.log(`@0x${addr.toString(16)}: not a 0x19 reply -> ${hex(reply)}`); break; }
+    const data = Array.prototype.slice.call(reply, 7);
+    if (!data.length) { console.log(`@0x${addr.toString(16)}: empty data, stopping`); break; }
+    for (const b of data) out.push(b);
+    addr += data.length;
+    iters++;
+  }
+  if (out.length) {
+    require("fs").writeFileSync(outFile, Buffer.from(out));
+    const nonFF = out.filter((b) => b !== 0xff).length;
+    console.log(`\nread ${out.length} bytes -> ${outFile}  (non-FF: ${nonFF})`);
+  } else {
+    console.log("No data read — 0x19 may need a length arg or a different request format.");
+  }
+}
+
 async function imprintedBit(dev) {
   const s = await readSystem(dev, [0xdf]);
   return { raw: s, bit: s && s.length ? (s[0] & 1) : null };
@@ -539,7 +574,13 @@ async function dumpMemory(dev, maxBytes = 320) {
   dev.on("error", (e) => console.error("device error:", e.message));
   try {
     const findIdx = process.argv.indexOf("--find");
-    if (process.argv.includes("--memsweep")) {
+    if (process.argv.includes("--readmem")) {
+      const ai = process.argv.indexOf("--readmem");
+      const start = parseInt(process.argv[ai + 1] || "0", 16);
+      const length = parseInt(process.argv[ai + 2] || "400", 16);
+      await identity(dev);
+      await readMem(dev, start, length);
+    } else if (process.argv.includes("--memsweep")) {
       await identity(dev);
       await memSweep(dev);
     } else if (process.argv.includes("--imprint")) {
