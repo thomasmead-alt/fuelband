@@ -367,6 +367,34 @@ async function writeTest2(dev) {
   console.log("may reply/commit via the unreadable channel or need save — next step from the bytes.");
 }
 
+// Write-structure search v3: the write offset IS the region address 0x503736,
+// so put 50 37 36 into the chunk as the address, with a marker to force a write.
+async function writeTest3(dev) {
+  console.log("\n=== WRITE STRUCTURE SEARCH v3 (address = 50 37 36) ===");
+  const d = [0xaa, 0xbb, 0xcc, 0xdd, 0x11, 0x22, 0x33, 0x44];
+  const dh = hex(d);
+  const structs = [
+    ["A op51 P76+83a2",         [0x51, 0x50, 0x37, 0x36, 0x83, 0xa2, ...d]],
+    ["B op51 f1+P76+83a2",      [0x51, 0x01, 0x50, 0x37, 0x36, 0x83, 0xa2, ...d]],
+    ["C op51 P76+off0+83a2",    [0x51, 0x50, 0x37, 0x36, 0x00, 0x00, 0x00, 0x83, 0xa2, ...d]],
+    ["D op52 P76+83a2",         [0x52, 0x50, 0x37, 0x36, 0x83, 0xa2, ...d]],
+    ["E op51 83a2+P76",         [0x51, 0x83, 0xa2, 0x50, 0x37, 0x36, ...d]],
+    ["F op51 P76+data",         [0x51, 0x50, 0x37, 0x36, ...d]],
+    ["G op52 P76+off0+data",    [0x52, 0x50, 0x37, 0x36, 0x00, 0x00, 0x00, ...d]],
+    ["H op51 f2+P76+83a2",      [0x51, 0x02, 0x50, 0x37, 0x36, 0x83, 0xa2, ...d]],
+  ];
+  for (const [name, cmd] of structs) {
+    outWrite(dev, frameData(cmd));
+    await delay(90);
+    const wr = tryRead(dev, 4);
+    await delay(130);
+    const back = await readDesktop(dev, 0);
+    const data = Array.prototype.slice.call(back, 7, 7 + d.length);
+    const stuck = data.some((b, i) => b === d[i] && b !== 0xff);
+    console.log(`${name}: wr ${hex(wr.data || []).slice(0, 17)} | back ${hex(data)} ${stuck ? "*** CHANGED ***" : ""}`);
+  }
+}
+
 // Critical test: can we write to the desktop region and read it back?
 async function writeTest(dev) {
   console.log("\n=== WRITE TEST (0x52 50 37 36) with read-back ===");
@@ -743,6 +771,9 @@ async function dumpMemory(dev, maxBytes = 320) {
     } else if (process.argv.includes("--imprint2")) {
       await identity(dev);
       await imprint2(dev);
+    } else if (process.argv.includes("--writetest3")) {
+      await identity(dev);
+      await writeTest3(dev);
     } else if (process.argv.includes("--writetest2")) {
       await identity(dev);
       await writeTest2(dev);
