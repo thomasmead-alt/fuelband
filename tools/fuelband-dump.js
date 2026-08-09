@@ -143,6 +143,25 @@ function frameData(cmd) { // plain data framing, bucket-aware
 }
 function outWrite(dev, buf) { dev.write(buf); } // output report
 
+// Read status (0xdf) and decode the "imprinted" flag. Per the DLL's
+// completeStatus, imprinted = bit 0 of status byte 0. This is the readable
+// feedback signal for whether an imprint attempt worked.
+async function readStatus(dev) {
+  console.log("\n=== STATUS (0xdf) — imprinted flag ===");
+  const s = await readSystem(dev, [0xdf]);   // system framing (like version)
+  const d = await readData(dev, [0xdf]);     // data framing
+  console.log(`status sys : ${s ? hex(s) : "-"}`);
+  console.log(`status data: ${d ? hex(d) : "-"}`);
+  const cand = [];
+  if (s && s.length) cand.push(["sys byte0", s[0]]);
+  if (d && d.length >= 3) cand.push(["data byte@3", d[3] ?? d[2]]);
+  for (const [where, b] of cand) {
+    if (b === undefined) continue;
+    console.log(`  ${where}=0x${b.toString(16).padStart(2, "0")}  imprinted(bit0)=${b & 1}  full-bits=${b.toString(2).padStart(8, "0")}`);
+  }
+  console.log("(bit 0 == 1 means the band considers itself imprinted)");
+}
+
 // CRC-16/XMODEM (poly 0x1021, init 0) — the config-block CRC.
 function crc16xmodem(bytes) {
   let crc = 0;
@@ -421,7 +440,10 @@ async function dumpMemory(dev, maxBytes = 320) {
   dev.on("error", (e) => console.error("device error:", e.message));
   try {
     const findIdx = process.argv.indexOf("--find");
-    if (process.argv.includes("--read-config")) {
+    if (process.argv.includes("--status")) {
+      await identity(dev);
+      await readStatus(dev);
+    } else if (process.argv.includes("--read-config")) {
       await identity(dev);
       await readConfig(dev);
     } else if (process.argv.includes("--set-clock")) {
