@@ -209,6 +209,37 @@ async function writeDesktopData(dev, blob, verbose = false) {
   return acks;
 }
 
+// Broad memory sweep of the desktop-data partition: page the 0xbb 50 37 36
+// read far past what we read before, flagging any bytes that aren't 0xFF (i.e.,
+// a stored/factory blob we can copy). Read-only.
+async function memSweep(dev, maxBytes = 32768) {
+  console.log("\n=== MEMORY SWEEP (0xbb 50 37 36, looking for non-FF) ===");
+  const all = [];
+  let offset = 0, iters = 0, nonFF = 0;
+  while (all.length < maxBytes && iters < 700) {
+    const off = [(offset >> 16) & 0xff, (offset >> 8) & 0xff, offset & 0xff];
+    const r = await readData(dev, [0xbb, 0x50, 0x37, 0x36, ...off]);
+    if (!r || r.length < 8) { console.log(`stopped @${offset}: short/no reply (${r ? hex(r) : "none"})`); break; }
+    const status = r[3];
+    const data = r.subarray(7);
+    for (const b of data) { all.push(b); if (b !== 0xff) nonFF++; }
+    // report any non-FF chunk immediately
+    if (data.some((b) => b !== 0xff)) {
+      console.log(`  @${offset}: NON-FF -> ${hex(r)}`);
+    }
+    iters++;
+    if (status !== 0x01) { console.log(`ended @${offset}: status=0x${status.toString(16)} (${all.length} bytes read)`); break; }
+    offset += 0x37;
+  }
+  console.log(`\nswept ${all.length} bytes in ${iters} reads; non-FF bytes: ${nonFF}`);
+  if (nonFF === 0) {
+    console.log("Entire swept region is 0xFF (erased) — no stored config on this band.");
+  } else {
+    require("fs").writeFileSync("fuelband-memsweep.bin", Buffer.from(all));
+    console.log("Wrote fuelband-memsweep.bin — non-FF data present, worth analyzing.");
+  }
+}
+
 async function imprintedBit(dev) {
   const s = await readSystem(dev, [0xdf]);
   return { raw: s, bit: s && s.length ? (s[0] & 1) : null };
@@ -508,7 +539,10 @@ async function dumpMemory(dev, maxBytes = 320) {
   dev.on("error", (e) => console.error("device error:", e.message));
   try {
     const findIdx = process.argv.indexOf("--find");
-    if (process.argv.includes("--imprint")) {
+    if (process.argv.includes("--memsweep")) {
+      await identity(dev);
+      await memSweep(dev);
+    } else if (process.argv.includes("--imprint")) {
       await identity(dev);
       await imprint(dev);
     } else if (process.argv.includes("--status")) {
