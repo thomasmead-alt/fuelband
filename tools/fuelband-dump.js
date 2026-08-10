@@ -395,6 +395,42 @@ async function writeTest3(dev) {
   }
 }
 
+// Fuzz opcodes to find one that WRITES the desktop region. For each candidate
+// opcode we send [op, 50 37 36, off0, testdata] and read back to see if the
+// region changed. Restricted to the memory/desktop opcode ranges (0x50-0x5f,
+// 0xb0-0xbf) to avoid reset/erase/latchup/boot commands.
+async function fuzzWriteOpcodes(dev) {
+  console.log("\n=== FUZZ WRITE OPCODES (region 50 37 36, read-back verified) ===");
+  const test = [0xa5, 0x5a, 0xc3, 0x3c, 0x77, 0x88];
+  const th = hex(test);
+  const opcodes = [];
+  for (let o = 0x50; o <= 0x5f; o++) opcodes.push(o);
+  for (let o = 0xb0; o <= 0xbf; o++) opcodes.push(o);
+  let changed = [];
+  for (const op of opcodes) {
+    // two arrangements: with an explicit 3-byte offset, and without
+    for (const withOff of [true, false]) {
+      const cmd = withOff
+        ? [op, 0x50, 0x37, 0x36, 0x00, 0x00, 0x00, ...test]
+        : [op, 0x50, 0x37, 0x36, ...test];
+      outWrite(dev, frameData(cmd));
+      await delay(70);
+      tryRead(dev, 4);
+      await delay(110);
+      const back = await readDesktop(dev, 0);
+      const data = Array.prototype.slice.call(back, 7, 7 + test.length);
+      if (data.some((b, i) => b === test[i] && b !== 0xff)) {
+        const tag = `op 0x${op.toString(16)} ${withOff ? "+off" : ""}`;
+        changed.push(tag);
+        console.log(`  *** REGION CHANGED by ${tag} -> readback ${hex(data)}`);
+      }
+    }
+  }
+  console.log(changed.length
+    ? `\nFound write opcode(s): ${changed.join(", ")} — that's the write primitive!`
+    : "\nNo opcode in 0x50-0x5f/0xb0-0xbf wrote the region. The write needs the stateful transfer, not a single opcode.");
+}
+
 // Critical test: can we write to the desktop region and read it back?
 async function writeTest(dev) {
   console.log("\n=== WRITE TEST (0x52 50 37 36) with read-back ===");
@@ -771,6 +807,9 @@ async function dumpMemory(dev, maxBytes = 320) {
     } else if (process.argv.includes("--imprint2")) {
       await identity(dev);
       await imprint2(dev);
+    } else if (process.argv.includes("--fuzzwrite")) {
+      await identity(dev);
+      await fuzzWriteOpcodes(dev);
     } else if (process.argv.includes("--writetest3")) {
       await identity(dev);
       await writeTest3(dev);
