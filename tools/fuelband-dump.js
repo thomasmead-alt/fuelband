@@ -1029,6 +1029,107 @@ async function runState(dev, state = 1) {
   console.log("  Revert with:  --runstate 0");
 }
 
+// ---------------------------------------------------------------------------
+// ACTIVATION FUZZ — payload variation only, on commands we can name.
+//
+// Deliberately NOT an opcode sweep. Everything here goes through 0x51 (the
+// verified config transfer) or 0x42 (timestamps). No unknown opcodes are ever
+// sent; that is what disabled a band earlier.
+// ---------------------------------------------------------------------------
+
+// Build a config blob with controllable identifier fields and TLVs.
+function buildBlob({ imprintState = 1, din = null, udi = null, groupId = null, extraTLVs = [] } = {}) {
+  const field48 = (v) => {
+    const out = new Array(48).fill(0);
+    if (v) for (let i = 0; i < Math.min(v.length, 48); i++) out[i] = v.charCodeAt(i);
+    return out;
+  };
+  const payload = [...field48(din), ...field48(udi), ...field48(groupId)];
+  payload.push(0x00, 0x0b, 0x04, (imprintState >>> 24) & 0xff, (imprintState >>> 16) & 0xff,
+               (imprintState >>> 8) & 0xff, imprintState & 0xff);
+  for (const t of extraTLVs) payload.push(...t);
+  const total = payload.length + 6;
+  const crc = crc16xmodem(payload);
+  return [(total >>> 24) & 0xff, (total >>> 16) & 0xff, (total >>> 8) & 0xff, total & 0xff,
+          ...payload, (crc >> 8) & 0xff, crc & 0xff];
+}
+
+async function statusBytes(dev) {
+  outWrite(dev, frameSys([0xdf]));
+  await delay(90);
+  const d = tryRead(dev, 1).data || [];
+  return d.length > 3 ? Array.prototype.slice.call(d, 3) : [];
+}
+
+async function fuzzActivation(dev) {
+  console.log("\n=== ACTIVATION FUZZ (named commands, payload variation only) ===");
+  const base = await statusBytes(dev);
+  console.log(`baseline status: ${hex(base)}   imprinted=${base.length ? base[0] & 1 : "?"}\n`);
+  let hits = 0;
+
+  const check = async (label) => {
+    const st = await statusBytes(dev);
+    const changed = hex(st) !== hex(base);
+    const imp = st.length ? st[0] & 1 : 0;
+    console.log(`    status ${hex(st)}  imprinted=${imp}${changed ? "   *** CHANGED ***" : ""}`);
+    if (imp === 1) { console.log(`\n*** IMPRINTED — ${label} ***`); hits++; return true; }
+    return false;
+  };
+
+  // Phase 1 — sweep imprint_state through the verified blob transfer.
+  console.log("--- phase 1: imprint_state values ---");
+  const values = [0x00000001, 0x00000002, 0x00000003, 0x0000000f, 0x000000ff,
+                  0x0000ffff, 0xffffffff, 0x00000010, 0x00000100, 0x80000000,
+                  0x7fffffff, 0x00010001];
+  for (const v of values) {
+    const blob = buildBlob({ imprintState: v });
+    const x = new FuelBandTransfer(dev, { verbose: false });
+    try { await x.send(blob); } catch (e) { console.log(`  0x${v.toString(16)}: write failed — ${e.message.split(":").pop().trim()}`); continue; }
+    await delay(180);
+    console.log(`  imprint_state=0x${v.toString(16).padStart(8, "0")}`);
+    if (await check(`imprint_state=0x${v.toString(16)}`)) return;
+  }
+
+  // Phase 2 — plausible identifiers rather than empty ones.
+  console.log("\n--- phase 2: populated DIN / UDI / group id ---");
+  const uuid = "12345678-1234-1234-1234-123456789abc";
+  const cases = [
+    [{ din: uuid, imprintState: 1 }, "DIN only"],
+    [{ din: uuid, udi: uuid, groupId: uuid, imprintState: 1 }, "all three"],
+    [{ din: uuid, udi: uuid, groupId: "1", imprintState: 0xffffffff }, "all three + max state"],
+  ];
+  for (const [opts, label] of cases) {
+    const x = new FuelBandTransfer(dev, { verbose: false });
+    try { await x.send(buildBlob(opts)); } catch (e) { console.log(`  ${label}: write failed`); continue; }
+    await delay(180);
+    console.log(`  ${label}`);
+    if (await check(label)) return;
+  }
+
+  // Phase 3 — timestamps. IDs 1..4 = device-init, assessment-start,
+  // fuel-reset, goal-reset. Read form is 0x42 <id>; write adds a 4-byte BE time.
+  console.log("\n--- phase 3: timestamps (0x42) ---");
+  const now = Math.floor(Date.now() / 1000);
+  for (const id of [0x01, 0x02, 0x03, 0x04]) {
+    outWrite(dev, frameSys([0x42, id]));
+    await delay(90);
+    const before = tryRead(dev, 1).data || [];
+    outWrite(dev, frameSys([0x42, id, ...beU32(now)]));
+    await delay(140);
+    const wr = tryRead(dev, 1).data || [];
+    await delay(120);
+    outWrite(dev, frameSys([0x42, id]));
+    await delay(90);
+    const after = tryRead(dev, 1).data || [];
+    console.log(`  id ${id}: before ${hex(before)}  write ${hex(wr)}  after ${hex(after)}` +
+                (hex(before) !== hex(after) ? "   *** TIMESTAMP SET ***" : ""));
+    if (await check(`timestamp id ${id}`)) return;
+  }
+
+  console.log(`\nNo combination set the imprinted bit (${hits} hits).`);
+  console.log("Every command sent was one named in Nike's DLL; no opcode sweeping.");
+}
+
 async function imprintedBit(dev) {
   const s = await readSystem(dev, [0xdf]);
   return { raw: s, bit: s && s.length ? (s[0] & 1) : null };
@@ -1337,6 +1438,9 @@ async function dumpMemory(dev, maxBytes = 320) {
     } else if (process.argv.includes("--imprint2")) {
       await identity(dev);
       await imprint2(dev);
+    } else if (process.argv.includes("--fuzz-activation")) {
+      await identity(dev);
+      await fuzzActivation(dev);
     } else if (process.argv.includes("--runstate")) {
       const ri = process.argv.indexOf("--runstate");
       const rs = process.argv[ri + 1];
