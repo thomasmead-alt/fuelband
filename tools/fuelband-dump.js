@@ -183,8 +183,14 @@ function buildConfigBlob(imprintState, opts = {}) {
   payload.push(0x00, 0x0b, 0x04,
     (imprintState >>> 24) & 0xff, (imprintState >>> 16) & 0xff, (imprintState >>> 8) & 0xff, imprintState & 0xff);
   if (opts.clockAutoSet !== undefined) payload.push(0x00, 0x0e, 0x01, opts.clockAutoSet & 0xff);
+  // Header is a big-endian 32-bit TOTAL length, not padding. Parser at
+  // 0x100331F0: len = BE32(data[0..3]); require len >= 6 and len <= received;
+  // then ptr += 4, payload_len = len - 6, CRC-16 over those payload bytes,
+  // compared against the trailing 2 bytes. So total = 4 + payload + 2 = len.
+  const total = payload.length + 6;
   const crc = crc16xmodem(payload);
-  return [0, 0, 0, 0, ...payload, (crc >> 8) & 0xff, crc & 0xff];
+  return [(total >>> 24) & 0xff, (total >>> 16) & 0xff, (total >>> 8) & 0xff, total & 0xff,
+          ...payload, (crc >> 8) & 0xff, crc & 0xff];
 }
 
 // Chunked set-desktop-data write (opcode 0x51). Data stream = [0x83,0xa2] + blob.
