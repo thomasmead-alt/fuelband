@@ -807,6 +807,99 @@ async function surfaceMap(dev, start = 0x00, end = 0xff) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// AUTHORITATIVE submit opcodes.
+//
+// Recovered from every "Submitting %02X" log site in FuelBandPlugin.dll by
+// exact byte pattern (`6a NN` push imm8 immediately preceding `68 <str>`), and
+// cross-checked against full disassembly of the individual handlers.
+//
+// This SUPERSEDES the earlier table derived from the command-registration
+// function, which was misaligned. In particular doTime submits 0x21 — the
+// earlier table said 0x31, which is actually 24-hour mode. Every previous
+// --set-clock run therefore sent a malformed 24-hour command.
+// ---------------------------------------------------------------------------
+const OP = {
+  time: 0x21,        // [time:4 BE][gmtOffset:4 BE][dstMinutes:1]   (doTime)
+  goal: 0x25,        // [type:1][goal:3 BE]                          (doGoal)
+  is24Hour: 0x31,    // [bool:1]                                     (do24Hour)
+};
+
+// Set the clock with the CORRECT opcode.
+async function setClock2(dev) {
+  const now = Math.floor(Date.now() / 1000);
+  const offMin = -new Date().getTimezoneOffset();
+  const gmt = (offMin * 60) >>> 0;
+  const cmd = [OP.time, ...beU32(now), ...beU32(gmt), 0x00];
+  console.log(`\n=== SET CLOCK (opcode 0x${OP.time.toString(16)} — corrected) ===`);
+  console.log(`local: ${new Date(now * 1000).toString()}`);
+  console.log(`sent : ${hex(cmd)}`);
+  outWrite(dev, frameData(cmd));
+  await delay(150);
+  const r4 = tryRead(dev, 4), r1 = tryRead(dev, 1);
+  console.log(`reply feat#4: ${r4.error ? "ERR" : hex(r4.data)}`);
+  console.log(`reply feat#1: ${r1.error ? "ERR" : hex(r1.data)}`);
+  await delay(150);
+  outWrite(dev, frameData([OP.time]));            // read it back
+  await delay(120);
+  const rb = tryRead(dev, 4);
+  console.log(`read back   : ${rb.error ? "ERR" : hex(rb.data)}`);
+  if (rb.data && rb.data.length > 3) {
+    const d = rb.data;
+    for (let off = 3; off + 4 <= d.length; off++) {
+      const t = ((d[off] << 24) | (d[off+1] << 16) | (d[off+2] << 8) | d[off+3]) >>> 0;
+      if (t > 1500000000 && t < 2000000000) console.log(`  -> decoded time @${off}: ${new Date(t*1000).toString()}`);
+    }
+  }
+}
+
+// Set the daily fuel goal (doGoal: [type][goal:3 BE]).
+async function setGoal(dev, goal = 2000, type = 0) {
+  const cmd = [OP.goal, type, (goal >> 16) & 0xff, (goal >> 8) & 0xff, goal & 0xff];
+  console.log(`\n=== SET GOAL ${goal} (opcode 0x${OP.goal.toString(16)}, type ${type}) ===`);
+  console.log(`sent : ${hex(cmd)}`);
+  outWrite(dev, frameData([OP.goal, type]));       // read current first
+  await delay(120);
+  const before = tryRead(dev, 4);
+  console.log(`before: ${before.error ? "ERR" : hex(before.data)}`);
+  outWrite(dev, frameData(cmd));
+  await delay(150);
+  const wr = tryRead(dev, 4);
+  console.log(`write reply: ${wr.error ? "ERR" : hex(wr.data)}`);
+  await delay(150);
+  outWrite(dev, frameData([OP.goal, type]));
+  await delay(120);
+  const after = tryRead(dev, 4);
+  console.log(`after : ${after.error ? "ERR" : hex(after.data)}`);
+  const changed = hex(before.data || []) !== hex(after.data || []);
+  console.log(changed ? "  *** GOAL CHANGED — individual option writes WORK ***" : "  unchanged");
+  return changed;
+}
+
+// Try activating the band the way the pre-blob protocol would have:
+// individual option writes rather than a config blob.
+async function activate(dev) {
+  console.log("\n=== ACTIVATE via individual option commands ===");
+  const st0 = await imprintedBit(dev);
+  console.log(`imprinted before: ${st0.bit}   status ${st0.raw ? hex(st0.raw) : "-"}`);
+  await setClock2(dev);
+  await setGoal(dev, 2000, 0);
+  console.log("\n=== 24-hour mode (0x31, one bool byte) ===");
+  outWrite(dev, frameData([OP.is24Hour]));
+  await delay(120);
+  console.log(`  read : ${hex((tryRead(dev,4).data) || [])}`);
+  outWrite(dev, frameData([OP.is24Hour, 0x01]));
+  await delay(150);
+  console.log(`  write: ${hex((tryRead(dev,4).data) || [])}`);
+  await delay(120);
+  outWrite(dev, frameData([OP.is24Hour]));
+  await delay(120);
+  console.log(`  after: ${hex((tryRead(dev,4).data) || [])}`);
+  const st1 = await imprintedBit(dev);
+  console.log(`\nimprinted after: ${st1.bit}   status ${st1.raw ? hex(st1.raw) : "-"}`);
+  console.log("\nNow UNPLUG the band and press its button — does it show a clock?");
+}
+
 async function imprintedBit(dev) {
   const s = await readSystem(dev, [0xdf]);
   return { raw: s, bit: s && s.length ? (s[0] & 1) : null };
@@ -1115,6 +1208,9 @@ async function dumpMemory(dev, maxBytes = 320) {
     } else if (process.argv.includes("--imprint2")) {
       await identity(dev);
       await imprint2(dev);
+    } else if (process.argv.includes("--activate")) {
+      await identity(dev);
+      await activate(dev);
     } else if (process.argv.includes("--surface")) {
       const ai = process.argv.indexOf("--surface");
       const a = process.argv[ai + 1], b = process.argv[ai + 2];
