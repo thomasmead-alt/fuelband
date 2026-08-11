@@ -1,15 +1,28 @@
-# FuelBand USB protocol & imprint investigation
+# Nike+ FuelBand (1st gen) — USB protocol
 
 Reverse-engineered from `FuelBandPlugin.dll` (extracted from the Nike+ Connect
-installer with 7-Zip; it's an NSIS package of native DLLs) and verified against
-a physical first-generation Nike+ FuelBand.
+installer with 7-Zip — an NSIS package of native DLLs), cross-checked against the
+Android app, and verified against two physical bands.
 
 The DLL retains its original C++ source filenames and log format strings
 (`FuelBandCommands.cc`, `DesktopOptions.cc`, `UsbDeviceWin.cc`), which is what
-made the command table and blob format recoverable.
+made the command set and blob format recoverable.
 
-**Status:** all *read* paths are solved and working. The *write* path is not.
-See [Current approach](#current-approach-the-write-problem).
+## Status
+
+| | |
+|---|---|
+| Transport | **solved** — including the `0x07` command wrapper |
+| Reads | **solved** — identity, status, battery, clock, goal, fuel, memory, config region |
+| Writes | **solved** — setters and the chunked config transfer, both verified byte-exact |
+| Config blob format | **solved** — including the BE32 length header |
+| Activation / imprint | **unsolved** — see §8 |
+
+Two units, both factory-new, both firmware **F2.12**:
+
+- **Band 1** (`20M9FC5V01660`) — clock, goal and 24-hour mode successfully written.
+  Later **disabled** by opcode `0x14` during an opcode sweep; see §9.
+- **Band 2** (`20M9FC6H01976`) — untouched reference unit. Read-only.
 
 ---
 
@@ -17,22 +30,22 @@ See [Current approach](#current-approach-the-write-problem).
 
 | | |
 |---|---|
-| Device | Nike+ FuelBand, 1st gen (not SE) |
 | USB ID | `11ac:6565` |
-| Test unit serial | `20M9FC5V01660` |
-| Test unit firmware | **F2.12** — raw `46 0c 02 61 4f 58 3d` |
+| Model string | `Nike+ FuelBand` |
+| Hardware revision | `03` |
+| Firmware | `F2.12` (raw `46 0c 02 61 4f 58 3d`) |
+| Protocol version | `02` |
 
-The version handler (`0x100408D0`) formats it as `sprintf("%c%u.%u", r[0], r[2], r[1])`
-— note **`r[2]` is major and `r[1]` is minor**, so the raw bytes `46 0c 02` read
-`F2.12`, not `F12.2`. (An earlier revision of this document had them transposed.)
+The version handler (`0x100408D0`) formats `sprintf("%c%u.%u", r[0], r[2], r[1])`
+— **`r[2]` is major, `r[1]` is minor**, so `46 0c 02` reads `F2.12`, not `F12.2`.
 
-The DLL calls the main processor the **MSP** (`<command name='version'
-description='Get the MSP firmware version number'>`), with a separate **network
-processor (NP)** that has its own version/boot/reset/stage/flash commands. That
-points at a TI MSP430 for the application core rather than the STM32 an earlier
-note assumed — see §8 before buying a debug probe.
+The DLL calls the application core the **MSP** (`Get the MSP firmware version
+number`), with a separate **network processor (NP)** owning its own
+version/boot/reset/stage/flash commands. `0x0a` returns the ASCII string
+`Not in boot` for the NP. That points at a TI MSP430 rather than the STM32 an
+early note assumed — see §10 before buying a debug probe.
 
-### HID report descriptor (read off the real device)
+### HID report descriptor (read off a real band)
 
 ```
 collection 0  usagePage:65280 usage:1
@@ -41,141 +54,214 @@ collection 0  usagePage:65280 usage:1
   output:  id 12 (63B), id 11 (31B), id 10 (15B), id 9 (7B)
 ```
 
-Reports are **size-bucketed**: pick the smallest bucket that fits the body.
+Reports are **size-bucketed** — use the smallest bucket that fits the body:
 
-| payload | output id | input id |
+| body | output id | reply id |
 |---|---|---|
-| 7B | 9 | 1 |
-| 15B | 10 | 2 |
-| 31B | 11 | 3 |
-| 63B | 12 | 4 |
+| ≤ 7B | 9 | 1 |
+| ≤ 15B | 10 | 2 |
+| ≤ 31B | 11 | 3 |
+| ≤ 63B | 12 | 4 |
 
 ### WebHID cannot drive this device
 
 WebHID only permits feature transfers on report IDs the descriptor *declares*
-(here: only 113, which itself won't read), and the band never emits input-report
+(here only 113, which itself won't read), and the band never emits input-report
 events. Every read path fails from a browser. hidapi (`node-hid`) has no such
-restriction — hence `tools/fuelband-dump.js`. This is a browser security limit,
-not a device limitation.
+restriction — hence `fuelband-dump.js`. A browser limitation, not a device one.
 
-### Two working framings
+### ★ The `0x07` command wrapper
 
-Both are `SET_REPORT`/`GET_REPORT` (feature) transfers in practice:
+**This is the single most important detail in the protocol.** Commands are not
+sent bare. They are wrapped:
 
-- **data family** — write `[outId, len, opcode, …args]`, read reply on feature ID 4.
-  Used by: account (`0x43 0x19`), memory read (`0xbb 50 37 36`), desktop read (`0x51`).
-- **system family** — write `[0x01, len+1, 0x07, opcode, …args]`, read reply on feature ID 1.
-  Used by: version (`0x08`), serial (`0xe1`), status (`0xdf`).
+```
+body = [ len+1, 0x07, <opcode>, <payload…> ]      sent as an OUTPUT report
+                                                   on the fitting size bucket
+reply read from FEATURE report 1
+```
 
-The Nike app itself sends commands as **output reports**
-(`HidD_SetOutputReport`, report type 2 — confirmed in the DLL's HID layer) and
-reads with `HidD_GetFeature`. `device.write()` in node-hid does the former.
-In practice feature-writes work for reads too; neither form makes writes commit.
+Replies come back as `[01, len, 0x07, …payload]`.
 
-### Reading a response
+Sending `<opcode> <payload…>` **without** the `0x07` wrapper produces
+`01 01 <opcode>` — an empty body, which by the DLL's own convention
+(handler `0x10037C20`) means *"operation not recognized by firmware"*:
 
-Replies are `[01, len, opcode, …]`. **`len` is the tell:**
+```
+len = response.length()
+if (len == 0)   -> "operation not recognized by firmware"
+else if (r[0])  -> "ERROR"
+else            -> "OK"
+```
 
-| reply | meaning |
-|---|---|
-| `01 01 <op>` | echo — the band ignored the command |
-| `len > 1` (e.g. `01 3d …`) | engaged — the band processed it |
-| `0x3d` | full 61-byte chunk (more data follows) |
+A long stretch of this investigation mistook that for the firmware lacking the
+commands. It was the wrapper missing. **An empty reply means "you addressed me
+wrongly" at least as often as it means "I don't implement that."**
 
-Multi-byte integers in payloads are **big-endian**.
+Region-selected reads (`0x51`/`0xbb` + a 3-byte region) also answer on the plain
+`[outId, len, opcode…]` framing with the reply on feature report 4, so both
+framings are real; they are not interchangeable per command.
 
 ---
 
 ## 2. Command opcodes
 
-From the `FuelBandCommands.cc` registration table (each entry pairs a
-completion handler with its opcode byte). Calibrated against two independently
-known values: `0x13` battery and `0x60` protocol version.
+Recovered from every `Submitting %02X` / `Completing %02X` log site by exact byte
+pattern (`6a NN` push imm8 immediately preceding `68 <str>`), and cross-checked
+against full disassembly of individual handlers.
 
-| opcode | command | | opcode | command |
-|---|---|---|---|---|
-| `0x08` | version | | `0x37` | display loop |
-| `0xe1` | serial | | `0x38` | display orientation |
-| `0xe0` | model | | `0x39` | display goal options |
-| `0xe2` | hw revision | | `0x3a` | gender |
-| `0xdf` | status | | `0x3b` | display format |
-| `0x13` | battery | | `0x40` | timestamp |
-| `0x60` | protocol version | | `0x42` | (display/timestamp) |
-| `0x0a` | network version | | `0x1a` | goal (get/set) |
-| `0x31` | **time (get/set clock)** | | `0x25` | fuel (get/set) |
-| `0x32` | 24-hour mode | | `0x51` | **get desktop data** |
-| `0x33` | metric units | | `0x52` | **set desktop data** |
-| `0x34` | weight | | `0x19` | read memory int (sample store) |
-| `0x35` | height | | `0xbb` | memory read (region-selected) |
-| `0x36` | age | | `0x17` | sample query |
+> **Superseded:** an earlier table in this document was derived by pairing
+> handlers to opcodes in the command-registration function. That pairing was
+> **misaligned** and produced wrong values — most damagingly `time = 0x31`, which
+> is actually 24-hour mode. Do not use it.
 
-Also present in the app's `<commands>` XML but not opcode-mapped here: `save`
-("save all programmable parameters to flash"), `reset`, `restoreDefaults`,
-`bootblock`, `eeprom-read/erase/query`, `latchup`, `network-*`.
+| opcode | command | payload |
+|---|---|---|
+| `0x08` | version | — |
+| `0xe1` | serial | — |
+| `0xe0` | model | — |
+| `0xe2` | hardware revision | — |
+| `0xdf` | status | — |
+| `0x13` | battery | — |
+| `0x60` | protocol version | — |
+| `0x0a` | network-processor version | — |
+| `0x21` | **clock** | `[time:4 BE][gmtOffset:4 BE][dstMinutes:1]` |
+| `0x24` | fuel | — (read) |
+| `0x25` | **goal** | `[type:1][goal:3 BE]` |
+| `0x31` | **24-hour mode** | `[bool:1]` |
+| `0x17` | sample query | — |
+| `0x19` | read memory int (sample store) | `[addr:3 BE]` |
+| `0xbb` | memory read | `[region:3][offset:3 BE]` |
+| `0x51` | get/set desktop data | see §5 |
+| `0x28` | run-state (`doRunState`) | `f1 29 <state>` + 4B BE offset if `state & 1` |
+| `0x1c` | **restoreDefaults** — destructive | — |
+| `0x1f` | sync finished | needs an LSO parameter |
+| `0x07` `0x09` `0x0b` `0xf2` | transfers / network flash / firmware image | do not send casually |
 
-### Region selector
-
-`0x51`/`0x52`/`0xbb` take a **3-byte region address** immediately after the
-opcode. The desktop-data region is `50 37 36` (ASCII "P76"). Without it the
-band echoes; with it, it engages. Then a 3-byte offset:
-
-```
-0x51 50 37 36 <off2> <off1> <off0>     → read desktop region at offset
-reply: 01 3d 51 01 <off3> <data …>
-```
-
-### Set clock (`0x31`)
-
-From `doTime`:
-
-```
-31 <time: 4B BE unix> <gmtOffset: 4B BE seconds> <dstOffsetMinutes: 1B>
-```
-
-The band **acks** this opcode but the clock does not visibly take, and it does
-not initialize the device — see §4.
+Opcodes the band answers that appear **nowhere in the DLL**: `0x02`, `0x05`
+(returns 8 bytes, e.g. `06 06 7e 81 1a 81 18 12` — possibly a unique ID),
+`0x06` (`06 01`), `0x0d`, `0x0e`. F2.12 does expose commands the Windows plugin
+never used.
 
 ---
 
-## 3. Config block (`DesktopOptions`)
-
-Read via `0x51`, written via `0x52`. Parser at `0x100331F0`, serializer at
-`0x10032c20`.
+## 3. Reads (all verified)
 
 ```
-[4-byte header] [payload …] [2-byte CRC, big-endian]
+07 08          -> 46 0c 02 61 4f 58 3d          firmware F2.12
+07 e1          -> "20M9FC6H01976"               serial
+07 e0          -> "Nike+ FuelBand"              model
+07 e2          -> 03                            hw revision
+07 df          -> 80 cf 3c 66 06 ff 0f 00       status (see §7)
+07 13          -> 45 59 0f 76                   battery: 69%, charging, 3958 mV
+07 60          -> 02                            protocol version
+07 21          -> 38 73 95 07 00 00 00 00 00    clock (unix BE) + gmt + dst
+07 25 00       -> 00 00 00                      goal
+07 31          -> 00                            24-hour mode
+07 24          -> 00 00 00                      fuel
+07 17          -> 21 bytes, zeros + live timestamp   sample store (empty)
 ```
 
-- Minimum total length 6; the 4-byte header is **not** covered by the CRC.
-- CRC covers the payload only.
+**Battery voltage is big-endian.** `0f 76` = 3958 mV at 69%; `10 5e` = 4190 mV at
+100%. Little-endian yields ~30 V and is wrong.
 
-### Payload layout
-
-Three fixed 48-byte identifier fields, then TLV-encoded options:
-
-| offset | field | note |
-|---|---|---|
-| 0 | `DIN` | 48B, Nike-issued |
-| 48 | `UDI` | 48B, Nike-issued |
-| 96 | `device group config id` | 48B, Nike-issued |
-| 144+ | TLV options | see below |
-
-TLV encoding (helpers at `0x10032ba0` tag, `0x10032b10` u32, `0x100328b0` string):
+Region-selected reads use the other framing:
 
 ```
-tag(2B BE)  len(1B)  value(len bytes, BE for integers)
+51 50 37 36 <off:3>   -> 01 3d 51 01 <nextOffset:3> <56 data bytes>
+bb 50 37 36 <off:3>   -> same shape
 ```
 
-Confirmed tags: `0x0001` metric weight, `0x0002` metric height,
-`0x000b` **imprint_state** (u32), `0x0005` email.
-Also serialized (tag numbers less certain): birthdate, screen name, first name,
-band name, profile update date, clock auto set.
+The desktop-data region is `50 37 36` (ASCII `P76`). The 3 bytes after the status
+are the **running offset**, i.e. requested offset + bytes returned.
+
+---
+
+## 4. Writes (all verified against hardware)
+
+Every setter works through the wrapper, and every one was confirmed by reading
+the value back:
+
+| command | before | written | read back |
+|---|---|---|---|
+| clock `0x21` | `38 6d 90 98` (Jan 2000 factory) | `6a 7a ad 81` | `6a 7a ad 81` ✓ and **ticking** |
+| goal `0x25` | `00 00 00` | `00 07 d0` (2000) | `00 07 d0` ✓ |
+| 24-hour `0x31` | `00` | `01` | `01` ✓ |
+
+The clock was later observed at `6a 7a ae 93` — **274 seconds later** — so the
+band keeps the time it is given. Settings persist across commands.
+
+---
+
+## 5. Config block (`DesktopOptions`) and the chunked transfer
+
+### Transfer
+
+Reconstructed from `0x100386f0` (annotated dump: `disasm-transfer.txt`) and
+verified end to end. Each chunk is built in this exact append order:
+
+```
+[83 a2] [flag] [off>>16] [off>>8] [off&0xff] [data …]
+```
+
+sent as the body of opcode `0x51` — **through the `0x07` wrapper**.
+
+- `extra` = `83 a2`, supplied by `doSetDesktopData` as an argument.
+- `flag` = `0` first chunk, `1` continuation, `2` final. The rewrite to `2` is
+  guarded by `test edx,edx; je`, so a **single-chunk transfer keeps flag 0**.
+- Offset is the cumulative bytes-sent counter (`this+0x18c`), 24-bit big-endian.
+- Data budget: `0x3c - 6 - 1` = **53 bytes** per chunk.
+
+All transfer state is host-side (`this+0x180` buffer, `this+0x18c` offset,
+`this+0x190` done flag). **Nothing is negotiated on the wire** — no BEGIN, no
+setup command, no handshake, and no finalize: `doSetDesktopData` issues nothing
+after the transfer, and the app's flow is *write → read back → compare DDBs*.
+
+The band acks each chunk with the running offset:
+
+```
+01 05 07 00 <offset:3>        e.g. 00 00 04, then 00 00 35, 00 00 6a, 00 00 a1
+```
+
+Verified writing 4 B, 54 B and 161 B, each read back byte-exact.
+
+### Blob format
+
+```
+[total length: 4 bytes BIG-ENDIAN] [payload …] [CRC-16: 2 bytes]
+```
+
+Parser at `0x100331F0`:
+
+```
+len = BE32(data[0..3])
+require len >= 6 and len <= bytes received
+ptr += 4 ; payload_len = len - 6
+CRC-16/XMODEM over payload_len bytes, compared to the trailing 2 bytes
+```
+
+so `total = 4 + payload + 2 = len`. **The header is the total length, not
+padding** — a header of zeros fails the `len >= 6` check immediately and the blob
+is discarded before any field is read.
+
+Payload: three fixed 48-byte identifier fields, then TLV options.
+
+| offset | field |
+|---|---|
+| 0 | `DIN` (48B, Nike-issued) |
+| 48 | `UDI` (48B, Nike-issued) |
+| 96 | `device group config id` (48B, Nike-issued) |
+| 144+ | TLV options |
+
+TLV: `tag(2B BE) len(1B) value(len bytes, BE)`. Confirmed tags: `0x0001` metric
+weight, `0x0002` metric height, `0x000b` **imprint_state** (u32), `0x0005` email.
+Also serialized: birthdate, screen name, first name, band name, profile update
+date, clock auto set.
 
 ### CRC-16/XMODEM
 
-Poly `0x1021`, init `0x0000`, MSB-first, no reflection, no final XOR. Table at
-`0x1005c700`; update is `crc = (crc<<8) ^ table[(crc>>8) ^ byte]`. Verified
-against the canonical check value (`"123456789"` → `0x31c3`).
+Poly `0x1021`, init `0x0000`, MSB-first, no reflection, no final XOR (table at
+`0x1005c700`). Verified against the canonical check value (`"123456789"` → `0x31c3`).
 
 ```js
 function crc16xmodem(bytes) {
@@ -191,342 +277,190 @@ function crc16xmodem(bytes) {
 
 ---
 
-## 4. State of the test unit
+## 6. Status byte
 
-The band displays a "connect to USB" prompt and will not track fuel. This is the
-**un-imprinted / never-provisioned** state — the app's own log string for it is
-`Desktop data Uninitialized length, assuming new device.`
+`0xdf` byte 0, observed across both units:
 
-Confirmed by reads:
-
-| check | result |
-|---|---|
-| status `0xdf` | `80 cf 3c 66 07 ff 0f 00` → **imprinted bit = 0** |
-| desktop region | `ff` at every offset |
-| memory sweep | 32,816 bytes swept, **zero** non-`0xff` bytes |
-
-The second band is also new-in-box, so there is no provisioned unit to copy a
-valid blob from.
-
-### Verification oracles (all readable)
-
-These are what make write attempts testable rather than blind:
-
-1. **imprinted bit** — `0xdf` status, bit 0 of byte 0. `0` = not imprinted.
-2. **region read-back** — `0x51 50 37 36 + off` returns the region contents, so
-   a committed write is directly visible.
-3. **engage vs echo** — reply `len > 1` means the band processed the command.
-
----
-
-## 5. The write path — reconstructed, and rejected by this firmware
-
-The app's write was reconstructed byte-for-byte from the transfer routine at
-`0x100386f0` (annotated dump: `disasm-transfer.txt`). A chunk is built in this
-exact append order:
-
-```
-[extra][flag][off>>16][off>>8][off&0xff][data…]      sent as the body of 0x51
-```
-
-- `extra` = `83 a2`, supplied by `doSetDesktopData` (`0x1003AE10`) as arg4.
-- `flag` = `0` first chunk, `1` continuation, `2` final. The rewrite to `2` at
-  `0x10038912` is guarded by `test edx,edx; je`, so a **single-chunk transfer
-  keeps flag 0** and never produces a final marker.
-- Offset is the cumulative bytes-sent counter (`this+0x18c`), 24-bit big-endian.
-- Data budget: `0x3c - 6 - 1` = **53 bytes** per chunk.
-
-Device-side state lives entirely in the app's own object — `this+0x180` payload
-buffer, `this+0x18c` bytes sent, `this+0x190` transfer-complete flag. **Nothing
-is negotiated on the wire**: there is no BEGIN, no setup command, and no
-handshake. `FuelBandTransfer` in `fuelband-dump.js` implements this exactly.
-
-### The surrounding transaction has no finalize step
-
-Traced from `doSetDesktopData` entry to return: after the transfer call it sets
-async result `0xb`, frees the temp string, and returns — **it issues no further
-command**. The `Desktop Data readback: wrote %u bytes, read %u bytes` log lives
-in `completeGetDesktopData` (`0x1003AF40`), alongside `Creating DDB objects from
-data written and read back, for comparison` and `DDB's are equivalent.` So the
-app's real sequence is:
-
-```
-write chunks  ->  read the region back  ->  compare the two DDBs
-```
-
-No commit, no flush, no prepare/erase anywhere in the desktop-data path. The app
-expects a successful write to be **immediately visible to the same read**.
-
-### What the band actually does
-
-### What `01 01 51` means — per Nike's own code
-
-The completion handler at `0x10037C20` defines the convention:
-
-```
-len = response.length()
-if (len == 0)   -> "operation not recognized by firmware"
-else if (r[0])  -> "ERROR"
-else            -> "OK"
-```
-
-Our write replies are `01 01 51` = report ID, length 1, opcode, and **zero
-payload bytes** — an empty response body. By the DLL's own definition that is
-*operation not recognized by firmware*, not a silent accept. This settles the
-earlier ambiguity about whether the writes were being taken and staged.
-
-Note also that the DLL contains **no firmware-version gate on the desktop-data
-path** — it does not branch by version before sending the write. The only
-known/unknown version check is for the *bootloader* (`device.bootloader.version-is-unknown`,
-set when a system-reserved field reads zero), unrelated to this.
-
-| test | result |
-|---|---|
-| `0x31` set clock (feature-write, then output-report, both framings) | acked, no effect |
-| A — 4B payload, single chunk (flag 0) | `01 01 51`, region unchanged |
-| B — 54B payload, two chunks (flags 0,2) | `01 01 51`, region unchanged |
-| C — 161B valid blob, 4 chunks (flags 0,1,1,2), correct CRC | `01 01 51`, region unchanged |
-| transfer-state sample (bare `0x51`) after each of A/B/C | identical to baseline — nothing staged |
-| commit candidates `0x28`, `0x50`, `0x53`, `0x54` | echo only, region unchanged |
-
-### Region-existence probe (decisive)
-
-If `83 a2 <flag>` is the low byte of a 24-bit region selector rather than a
-protocol prefix — which matches the read form `[opcode][region:3][offset:3]` —
-then the region can be probed directly in the read form:
-
-| region | reply | |
+| unit / state | byte 0 | bits |
 |---|---|---|
-| `0x503736` (control) | `01 3d 51 01 00 00 38 ff…` | **exists** |
-| `0x83a200` | `01 01 51` | not recognised |
-| `0x83a201` | `01 01 51` | not recognised |
-| `0x83a202` | `01 01 51` | not recognised |
+| band 2, factory | `80` | `1000 0000` |
+| band 1, factory | `80` | `1000 0000` |
+| band 1, after clock + goal + 24-hour writes | `c8` | `1100 1000` |
 
-**Conclusion.** This band does not act on the write form the 2015 Nike+ Connect
-DLL emits, under any construction we can produce, and stages nothing. Whether
-that is because region `0x83a2xx` does not exist in firmware `F2.12`
-(`46 0c 02 61 4f 58 3d`), or because `83 a2` is a prefix requiring device state
-we cannot establish, is **not distinguishable from outside** — both produce the
-identical bare echo.
-
-Static analysis of the DLL is exhausted for this path: the packet construction,
-the transaction around it, and the absence of any finalize step are all now
-established facts, and the band still refuses. What remains is not "which packet
-did we miss" but "what does this firmware implement".
-
-> **Caveat on the wording.** "Region `0x83a2xx`" and "prefix `83 a2` plus a flag"
-> are the *same bytes on the wire* and cannot be distinguished by any external
-> test. Do not record this as "the firmware lacks region `0x83a2xx`" — the
-> falsifiable claim is that **the band does not act on `51 83 a2 …`**. Anyone
-> inspecting a firmware dump should look for the handler that consumes that
-> sequence, not for a region table entry.
-
-### Loose end: `0x51` replies are length-dependent
-
-The handler's reply varies with command length in a way we have not mapped, and
-one observation was not reproducible across sessions:
-
-| sent | reply |
-|---|---|
-| `51` (alone) | `01 01 51` |
-| `51 de ad be ef` (op + 5) | `01 02 51 01` |
-| `51 0d de ad be ef` (op + 5, different lead) | `01 07 51 00 00 00 00 00 00` |
-| `51 83 a2 00 00 00 00` (op + 6, unknown region) | `01 01 51` |
-| `51 50 37 36 00 00 00` (op + 6, known region) | `01 3d 51 01 00 00 38 …` |
-
-An earlier fuzz run got `01 02 51 01` / `01 07 51 …` from short `0x51` forms; a
-later run returned `01 01 51` for comparable inputs. That is the only hint of
-session-dependent state we have seen, and it is worth re-checking during a USB
-capture — it may indicate the handler behaves differently once the device has
-been put into some mode we never established.
+Our writes set **bits 6 and 3** — most plausibly "clock configured" and "goal
+configured". **Bit 0 is `imprinted`** and was never set by anything we sent.
+Remaining bytes (`cf 3c 66 06 ff 0f 00`) are recorded but not decoded; byte 4 was
+observed drifting `07` → `06`.
 
 ---
 
-## 6. Root cause of the imprint problem
+## 7. Factory baseline (band 2, untouched)
 
-Even with a working write primitive, imprinting is **provisioning, not
-configuration**. The blob's first three fields — `DIN`, `UDI`,
-`device group config id` — plus `email`, `birthdate`, `screen name`,
-`profile update date` and `imprint_state` are Nike **account-issued** values,
-handed to the band during first-time setup through a Nike+ account. Nike shut
-down the Nike+ services and Nike+ Connect on **30 April 2018**.
-
-So a factory-blank band cannot be provisioned offline unless the firmware
-accepts fabricated identifiers — which is unknown and untestable without either
-the firmware or a capture of a real session.
+```
+firmware   F2.12          protocol version 02       hw revision 03
+serial     20M9FC6H01976  model "Nike+ FuelBand"
+status     80 cf 3c 66 06 ff 0f 00   (imprinted = 0)
+battery    69%, charging, 3958 mV
+clock      38 73 95 07  -> 2000-01-05  (factory default)
+goal 0     fuel 0        24-hour 0     sample store empty
+```
 
 ---
 
-## 7. Ruled out
+## 8. What remains unsolved: activation
 
-- **Sample store (`0x19`)** — reads the workout sample store (its address comes
-  from a `sample.lso` property), not arbitrary memory. Empty on a blank band.
-- **Firmware read over USB** — no command exposes a raw flash/code read. `0xf2`
-  (`device.firmware.image`) goes through the same chunked-transfer path and is
-  an upgrade-staging path, not a readback.
-- **Copying a valid blob from a second band** — the spare is also new-in-box.
-- **FuelBand SE route** — different device (BLE, keyless auth, settings
-  `FUEL=48 / CALORIES=49 / STEPS=50`); irrelevant to this hardware.
+Both bands display a "connect to USB" prompt and never show a clock, even with
+the clock set and running, because they are **un-imprinted**. The app's own log
+string for this state is `Desktop data Uninitialized length, assuming new device.`
 
-## 7a. What the Android app adds (`nike-fuelband.apk`, Apr 2015)
+What we established:
 
-Decompiled with androguard. The app targets the **FuelBand SE over BLE**
-("Copperhead" protocol), not this band's USB path, but it answers the
-provisioning question directly.
+- The config write commits (region read-back confirms the `00 00 00 a1` header)
+  but **does not set the imprinted bit**.
+- `doRunState` (`0x28`) is **rejected** even with the payload derived exactly
+  from the DLL (`28 f1 29 01 00 01 51 80`). This one is a genuine refusal, not a
+  framing error — the correct form was sent and returned an empty body.
+- No prepare/begin/commit/finalize step exists anywhere in the desktop-data path.
+- No firmware-version gate exists on that path either.
 
-### DIN is a server-issued UUID, and it is the auth key
+The blob's leading fields — `DIN`, `UDI`, `device group config id` — plus email,
+birthdate, screen name and profile update date are **Nike account-issued values**
+(§9). Nike shut down the Nike+ services on **30 April 2018**. It is therefore
+possible that no fabricated blob will ever satisfy the firmware, and that the
+"desktop data" region is storage the *host* owns and the band never interprets.
 
-`Lfuelband/lb$a;->a(JSONObject)` parses a device record straight from a Nike
-service response — keys `serialNumber`, `deviceId`, `firmwareVersion`,
-`softwareVersion`, `manufacturer`, `deviceString`, `deviceType`, **`din`** — and
-writes it into a local SQLite `devices` table keyed by serial number.
+The activation trigger is not in the command surface we can name from the DLL.
 
-On connect (`Lcom/nike/fuel/device/v;->a`), the app reads the row back
+---
+
+## 9. What the Android app adds (`nike-fuelband.apk`, Apr 2015)
+
+Decompiled with androguard. Targets the FuelBand **SE over BLE** ("Copperhead"),
+not this band's USB path, but it settles the provisioning question.
+
+**DIN is a server-issued UUID, and it is the auth key.** `Lfuelband/lb$a;` parses
+a device record straight from a Nike service response — `serialNumber`,
+`deviceId`, `firmwareVersion`, `manufacturer`, `deviceType`, **`din`** — into a
+local SQLite `devices` table keyed by serial. On connect the app reads it back
 (`SELECT din FROM devices WHERE serial_number = ? AND din NOT NULL`) and logs
-either `DIN is null for serial number:` or **`Din used for BLE Auth key:`**.
+`Din used for BLE Auth key:`. It is never computed client-side.
 
-So the DIN is a **stored per-device secret obtained from Nike's service**. It is
-never computed on the client. That is the same `DIN` the desktop config blob
-carries as its first 48-byte field.
-
-### Key derivation (fully recovered)
-
-`Lfuelband/en;->a(String)[B`:
+**Key derivation** (`Lfuelband/en;->a(String)`):
 
 ```java
-UUID u = UUID.fromString(din);                        // the DIN is a UUID
+UUID u = UUID.fromString(din);
 byte[] b = ByteBuffer.allocate(16)
     .putLong(u.getMostSignificantBits())
     .putLong(u.getLeastSignificantBits()).array();
 byte[] x = new byte[16];
 for (int i = 0; i < 16; i++) x[i] = (byte)(L[i] ^ b[i]);
-return MessageDigest.getInstance("MD5").digest(x);    // 16-byte auth key
+return MessageDigest.getInstance("MD5").digest(x);
 ```
 
-with the hardcoded constant `L = Lfuelband/en;->l`:
+with `L = b3 7e bf 75 c6 c7 19 24 a3 b1 88 4a 29 70 44 35`.
 
-```
-b3 7e bf 75 c6 c7 19 24 a3 b1 88 4a 29 70 44 35
-```
+**The legacy fallback key is sixteen `0xFF` bytes** (`en->a`, filled with `-1`),
+used when no DIN row exists — logged as `Using legacy auth token`. This
+independently confirms the published all-`FF` SE auth result and explains it as
+Nike's own no-DIN fallback rather than an external discovery.
 
-### The legacy fallback key is sixteen 0xFF bytes
+**The mobile client cannot write desktop data at all:**
+`Cmd_DesktopData.encode()` throws
+`ProtocolCoderException("desktop data functionality is not supported")`. No
+imprint or provisioning flow exists anywhere in the dex.
 
-`Lfuelband/en;->a` is initialised as `new byte[16]` filled with `-1`. When no
-DIN row exists, `Lcom/nike/fuel/device/aa;->a` logs `Using legacy auth token`
-(and, on one branch, `Using legacy auth token.  Todd was wrong`) and
-authenticates with that all-`FF` array.
+### Cross-version comparison of Nike+ Connect
 
-This independently confirms the published SE result that an all-`FF` token
-authenticates, and explains *why*: it is Nike's own no-DIN fallback path, not a
-flaw discovered from outside.
-
-### The mobile client cannot write desktop data
-
-`NikeProtocolCoder_Copperhead$Cmd_DesktopData` (extends `Cmd_GenericMemoryBlock`)
-implements `decode()` by delegating to the generic memory-block reader, but
-`encode()` is:
-
-```java
-throw new ProtocolCoderException("desktop data functionality is not supported");
-```
-
-**Desktop-data writing was a Windows/USB-only capability.** There is no imprint
-or provisioning flow anywhere in the APK — no `imprint` string occurs in the
-dex at all. The phone consumes a DIN that the service already issued; it never
-creates one.
-
-### Bearing on this investigation
-
-This does **not** unblock the gen-1 USB write. Our band fails at command
-recognition, not authentication — there is no auth handshake in the USB
-protocol, so a key is not what is missing. What it does settle is the
-provisioning question: the identifiers in the config blob originate from Nike's
-service, keyed by serial number, and no client ever synthesised them.
-
-## 7b. Cross-version comparison of Nike+ Connect
-
-Three installer versions were extracted and compared, to test whether an older
-desktop app used a different (older) desktop-write form that this band's
-factory firmware might accept.
-
-| version | plugin | `do*` / `complete*` handlers | desktop write |
+| version | plugin | `do*` / `complete*` | desktop write |
 |---|---|---|---|
 | 4.1.2.42 | `FuelbandPlugin.dll` | **2 / 3** | absent |
 | 5.3.8.37 | `FuelbandPlugin.dll` | 27 / 32 | `83 a2`, opcode `0x51` |
 | 6.6 | `FuelBandPlugin.dll` | 29 / 32 | `83 a2`, opcode `0x51` |
 
-**4.1.2.42's plugin is a near-stub** — two `do*` handlers in total. It parses
-`DesktopOptions` (the `.cc` name and "Cannot determine desktop data length from
-only %d bytes" are present) but implements almost no commands. Nike+ Connect 4.x
-predates mature FuelBand support, so its lack of `doSetDesktopData` reflects an
-immature *host application*, **not** evidence that the firmware command was
-introduced later. (An earlier reading of this comparison over-claimed that; it
-is not supported.)
+4.1.2.42's plugin is a **near-stub** — Nike+ Connect 4.x predates mature FuelBand
+support, so its missing `doSetDesktopData` reflects an immature host app, **not**
+evidence the firmware command came later. 5.3.8.37 and 6.6 are the same protocol
+(identical `0x3c` budget, offset construction, marker and opcode), so **no
+alternative desktop-write form exists in any shipped version.**
 
-**5.3.8.37 and 6.6 are the same protocol.** Both build the chunk with the
-identical `0x3c` budget and the same `shr 0x10` / `and 0xff` × 3 big-endian
-offset construction, both use marker `83 a2`, both submit opcode `0x51`.
+Neither installer bundles firmware — Nike+ Connect downloaded it from its servers.
 
-So **no alternative desktop-write form exists in any shipped version.** The
-sequence we reconstructed is the only one Nike ever used over USB, and the
-band's rejection is not a host-version mismatch.
+---
 
-Neither installer bundles a firmware image — Nike+ Connect downloaded firmware
-from its servers (`convert.fwversion` is the only firmware-file reference).
-That leaves one hypothesis this comparison *cannot* rule out: the band's factory
-firmware may predate the desktop-write command, with Nike+ Connect upgrading it
-on first connect via `doMainUpgrade` / the `0x09` image transfer. If so, the
-missing artifact is an archived FuelBand firmware image, not a protocol detail.
+## 10. Incident: opcode `0x14` disabled band 1
 
-## 8. Remaining paths
+During a blind opcode sweep (`--surface`), sending bare `0x14` caused
+`IOHIDDeviceSetReport` to fail with an I/O timeout. The band's display went dark,
+it stopped responding to the button, and it no longer enumerates over USB.
 
-Both remaining routes answer the same, now precisely-stated question: **does
-firmware `F2.12` implement region `0x83a2xx`, and what gates it?**
+- `0x14` appears **nowhere** in the DLL — neither as a submit nor a completion
+  opcode. Nike's own software never sends it.
+- The failure was on the **write**, meaning the device stopped mid-transaction
+  rather than returning an error — consistent with it cutting its own power.
+- `0x13` is `battery`; a battery-control command adjacent to the battery query is
+  a plausible layout, and the XML lists **`latchup` — "Turn off battery"**.
 
-1. **USB capture of Nike+ Connect** (Wireshark + USBPcap on Windows) — shows
-   what the real app sends *to this band*, including anything earlier in the
-   session that static analysis wouldn't attribute to the desktop-data path. If
-   a capture shows `0x83a2xx` sent and ignored, the firmware-gate hypothesis
-   becomes dominant. Gated on whether the 2015-era app still launches.
-2. **Hardware firmware dump.** *Identify the silicon before buying a probe.* The
-   DLL calls the application core the **MSP**, which points at a **TI MSP430**,
-   not the STM32 an earlier revision of this document assumed. That changes the
-   toolchain completely:
+Best assessment: `0x14` is `latchup` or equivalent. Latchup is a shipping mode
+and is *designed* to be exited by applying USB power, which is why a new band
+wakes when first plugged in. The band was at 100% / 4190 mV when it went dark, so
+this is not a flat cell. Recovery is a long charge on a powered USB-A source, plus
+the 10-second button reset.
 
-   - **MSP430** debugs over **JTAG or Spy-Bi-Wire** (2-wire: `TEST`/`SBWTCK`,
-     `RST`/`SBWTDIO`) using an MSP-FET / TI LaunchPad and `mspdebug`. Protection
-     is a **JTAG fuse** (blown = irreversible lockout, no recovery) plus an
-     optional BSL password — *not* STM32-style RDP levels, and there is no
-     "lower the protection and mass-erase" middle ground.
-   - Open the case and read the chip markings first. If it really is an STM32,
-     the SWD route applies instead (SWDIO/SWCLK/NRST, check the RDP option byte,
-     `dump_image fuelband.bin 0x08000000 0x60000`).
+**Lesson recorded deliberately:** do not sweep unnamed opcodes against hardware
+you cannot replace. The tool's sweep now skips `0x14`, guards every write, and
+resumes after a hang — but the sweep should not have existed in that form.
+`--safe` exists for read-only work and sends only documented getters.
 
-   Whatever the core, the CRC-16/XMODEM table (poly `0x1021`) is a recognisable
-   landmark in the dump; the desktop-data parser and the handler that consumes
-   `51 83 a2 …` should sit near it.
+---
+
+## 11. Remaining paths
+
+Both answer the same question: **what performs activation on F2.12?**
+
+1. **USB capture of Nike+ Connect** (Wireshark + USBPcap on Windows) against a
+   real band — shows everything the app sends, including anything earlier in the
+   session that static analysis would not attribute to the desktop-data path.
+   Gated on whether the 2015-era app still launches.
+2. **Hardware firmware dump.** *Identify the silicon first.* The DLL calls the
+   core the **MSP**, pointing at a **TI MSP430**, not an STM32:
+   - MSP430 debugs over **JTAG or Spy-Bi-Wire** (`TEST`/`SBWTCK`, `RST`/`SBWTDIO`)
+     with an MSP-FET and `mspdebug`. Protection is a **JTAG fuse** — blown is
+     irreversible, with no STM32-style "lower RDP and mass-erase" middle ground.
+   - Open the case and read the chip markings before buying a probe.
+
+   The CRC-16/XMODEM table (poly `0x1021`) is a recognisable landmark in a dump;
+   the desktop-data parser and whatever consumes `51 83 a2 …` should sit near it.
 
 ---
 
 ## Tool reference
 
-`tools/fuelband-dump.js` (needs `npm install` in `tools/`):
+`tools/fuelband-dump.js` — run `npm install` in `tools/` first.
 
-| flag | what it does |
+**Read-only, safe:**
+
+| flag | purpose |
 |---|---|
-| *(none)* | probe both framings + memory dump |
-| `--recon` | read-only baseline: identity, status, all timestamps, account region |
+| `--safe` | documented getters only — identity, status, battery, clock, goal, fuel |
+| `--recon` | baseline: identity, status, timestamps, account region |
 | `--status` | status `0xdf`, decodes the imprinted bit |
-| `--read-config` | desktop config read via `0x51` |
+| `--probe2` | 07-wrapped reads of the wider command set |
+| `--read-config` | desktop config block via `0x51` |
 | `--memsweep` | sweep the desktop partition for non-`0xff` bytes |
-| `--readmem <hex> <hex>` | read via `0x19` (sample store) |
-| `--set-clock` | send `0x31` with current time, verify |
-| `--fuzz` | sweep write framings, report which *engage* |
-| `--writetest` / `--writetest2` / `--writetest3` | write-structure searches with read-back |
-| `--fuzzwrite` | sweep opcodes for one that writes the region |
-| `--imprint` / `--imprint2` | build + write config blob, sweep `imprint_state` |
-| `--find <n>` | scan readable regions for a number shown on the band |
+| `--find <n>` | scan readable regions for a value shown on the band |
 
-Read-only: `--recon`, `--status`, `--read-config`, `--memsweep`, `--readmem`,
-`--find`. The rest write to the band (recoverable — hold the button ~10s for
-RESET).
+**Writes to the band:**
+
+| flag | purpose |
+|---|---|
+| `--activate` | clock + goal + 24-hour through both framings, read back |
+| `--xfer [hex…]` | send a payload through the chunked transfer, verify by read-back |
+| `--ladder` | 4 B / 54 B / valid-blob transfers with read-back |
+| `--imprint2` | write the config blob, sweep `imprint_state` |
+| `--runstate [0\|1]` | `doRunState` with the exactly-derived payload |
+
+**Dangerous — do not use casually:**
+
+| flag | why |
+|---|---|
+| `--surface [lo] [hi]` | sweeps unnamed opcodes; this is what disabled band 1 |
