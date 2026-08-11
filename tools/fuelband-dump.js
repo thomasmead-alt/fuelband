@@ -322,9 +322,16 @@ async function fuzzWrite(dev) {
 // [01,len,51,status,off(3),...data]. Returns the data bytes.
 async function readDesktop(dev, offset) {
   const o = [(offset >> 16) & 0xff, (offset >> 8) & 0xff, offset & 0xff];
-  outWrite(dev, frameData([0x51, 0x50, 0x37, 0x36, ...o]));
-  await delay(60);
-  const r = tryRead(dev, 4);
+  const cmd = [0x51, 0x50, 0x37, 0x36, ...o];
+  // Prefer the 07-wrapped framing (the form the band actually answers on for
+  // command opcodes); fall back to the plain data framing.
+  outWrite(dev, frameSys(cmd));
+  await delay(70);
+  let r = tryRead(dev, 1);
+  if (r.data && r.data.length > 3) return r.data;
+  outWrite(dev, frameData(cmd));
+  await delay(70);
+  r = tryRead(dev, 4);
   return r.data || [];
 }
 
@@ -513,11 +520,12 @@ async function imprint2(dev) {
 // header carries a flag byte AND a 3-byte offset (4 bytes after the marker).
 // ---------------------------------------------------------------------------
 class FuelBandTransfer {
-  constructor(dev, { opcode = 0x51, extra = [0x83, 0xa2], verbose = true } = {}) {
+  constructor(dev, { opcode = 0x51, extra = [0x83, 0xa2], verbose = true, framing = "sys" } = {}) {
     this.dev = dev;
     this.opcode = opcode;
     this.extra = extra;
     this.verbose = verbose;
+    this.framing = framing;   // "sys" = 07-wrapped (the form the band answers on)
     this.offset = 0;
     this.done = false;
     this.replies = [];
@@ -549,9 +557,10 @@ class FuelBandTransfer {
     while (this.offset < buffer.length) {
       const chunk = this.buildChunk(buffer);
       const cmd = [this.opcode, ...chunk];
-      outWrite(this.dev, frameData(cmd));
+      const useSys = this.framing === "sys";
+      outWrite(this.dev, useSys ? frameSys(cmd) : frameData(cmd));
       await delay(80);
-      const r = tryRead(this.dev, 4);
+      const r = tryRead(this.dev, useSys ? 1 : 4);
       const reply = r.data || [];
       this.replies.push(reply);
       if (this.verbose) {
