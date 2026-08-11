@@ -313,6 +313,21 @@ Both bands display a "connect to USB" prompt and never show a clock, even with
 the clock set and running, because they are **un-imprinted**. The app's own log
 string for this state is `Desktop data Uninitialized length, assuming new device.`
 
+**The config blob does not drive the imprinted bit.** Fifteen well-formed blobs
+were written and verified — correct BE32 header, valid CRC-16, twelve different
+`imprint_state` values, and both empty and populated `DIN`/`UDI`/group-id fields.
+The status byte never moved from `80 cf 3c 66 06 ff 0f 00` in any case. Combined
+with the fact that Nike's own mobile client cannot write desktop data at all
+(§9), the most likely reading is that **"desktop data" is storage the host owns
+and the band does not interpret**.
+
+**Timestamps read as unset and are not the trigger either.** `0x42 <id>` returns
+`[timestamp:4 BE][id:1]`, and all four ids (device-init, assessment-start,
+fuel-reset, goal-reset) read as zero on a factory band. Note the id is echoed
+*last*, so a write is likely `42 <time:4 BE> <id>` — an attempt using
+`42 <id> <time:4>` did not take, which is consistent with that ordering rather
+than with the command being unsupported.
+
 What we established:
 
 - The config write commits (region read-back confirms the `00 00 00 a1` header)
