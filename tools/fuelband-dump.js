@@ -973,7 +973,6 @@ async function probe2(dev) {
     [[0x17], "sample-query"],
     [[0x1a], "?0x1a"],
     [[0x24], "?0x24"],
-    [[0x1c], "?0x1c  (restoreDefaults — READ ONLY, no args)"],
     [[0x60], "protocol version"],
     [[0x08], "version"],
   ];
@@ -1024,6 +1023,50 @@ async function runState(dev) {
     if (now !== base) console.log("    *** STATUS CHANGED ***");
   }
   console.log("\nUnplug and press the button — any display now?");
+}
+
+// STRICTLY SAFE: unambiguous getters only. Every opcode here is a documented
+// read in the DLL and takes no state-changing action. No unknown opcodes, no
+// restoreDefaults/reset/latchup/bootblock candidates, nothing written.
+async function safeRead(dev) {
+  console.log("\n=== SAFE READ (getters only, nothing written) ===");
+  const GETTERS = [
+    [[0x08], "version"],
+    [[0xe1], "serial"],
+    [[0xe0], "model"],
+    [[0xe2], "hw revision"],
+    [[0xdf], "status"],
+    [[0x13], "battery"],
+    [[0x60], "protocol version"],
+    [[0x21], "clock"],
+    [[0x25, 0x00], "goal"],
+    [[0x31], "24-hour mode"],
+    [[0x24], "fuel"],
+  ];
+  for (const [cmd, label] of GETTERS) {
+    let d = [];
+    try {
+      outWrite(dev, frameSys(cmd));
+      await delay(90);
+      d = tryRead(dev, 1).data || [];
+    } catch (e) {
+      console.log(`  ${label.padEnd(18)} ERROR: ${e.message.split(":").pop().trim()}`);
+      continue;
+    }
+    const body = d.length > 3 ? Array.prototype.slice.call(d, 3) : [];
+    let extra = "";
+    if (label === "battery" && body.length >= 4)
+      extra = `   -> ${body[0]}%, ${body[1] === 0x59 ? "charging" : "idle"}, ${(body[2] | (body[3] << 8))} mV`;
+    if (label === "status" && body.length)
+      extra = `   -> imprinted(bit0)=${body[0] & 1}`;
+    if (label === "clock" && body.length >= 4) {
+      const t = ((body[0] << 24) | (body[1] << 16) | (body[2] << 8) | body[3]) >>> 0;
+      if (t > 946684800) extra = `   -> ${new Date(t * 1000).toISOString()}`;
+    }
+    if ((label === "serial" || label === "model") && body.length) extra = `   -> "${ascii(body)}"`;
+    console.log(`  ${label.padEnd(18)} ${hex(body) || "(empty)"}${extra}`);
+  }
+  console.log("\nRead-only. Nothing on the band was changed.");
 }
 
 async function imprintedBit(dev) {
@@ -1337,6 +1380,9 @@ async function dumpMemory(dev, maxBytes = 320) {
     } else if (process.argv.includes("--runstate")) {
       await identity(dev);
       await runState(dev);
+    } else if (process.argv.includes("--safe")) {
+      await identity(dev);
+      await safeRead(dev);
     } else if (process.argv.includes("--probe2")) {
       await identity(dev);
       await probe2(dev);
