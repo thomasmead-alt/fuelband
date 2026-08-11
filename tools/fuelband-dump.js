@@ -799,11 +799,13 @@ async function surfaceMap(dev, start = 0x00, end = 0xff) {
   const recognised = [];
   for (let op = start; op <= end; op++) {
     if (SURFACE_SKIP.has(op)) { console.log(`  0x${op.toString(16).padStart(2,"0")}  [skipped — unsafe]`); continue; }
-    outWrite(dev, frameData([op]));
+    // 07-wrapped framing — the form the band actually answers on. The first
+    // version of this sweep used the data framing and would have found nothing.
+    outWrite(dev, frameSys([op]));
     await delay(45);
-    const r = tryRead(dev, 4);
+    const r = tryRead(dev, 1);
     const d = r.data || [];
-    const body = d.length > 2 ? Array.prototype.slice.call(d, 3) : [];
+    const body = d.length > 3 ? Array.prototype.slice.call(d, 3) : [];
     if (body.length) {
       const note = KNOWN_OPCODES[op] ? `DLL: ${KNOWN_OPCODES[op]}` : "*** NOT IN DLL TABLE ***";
       recognised.push([op, body, note]);
