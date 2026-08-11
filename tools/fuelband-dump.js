@@ -749,6 +749,64 @@ async function commitTest(dev) {
   console.log("  region NOT recognised       -> this firmware has no 0x83a2xx; static analysis ends here");
 }
 
+// Opcodes the DLL's command table knows about, for cross-referencing.
+const KNOWN_OPCODES = {
+  0x07: "chunked transfer: NP image", 0x08: "version", 0x09: "chunked transfer: main FW image",
+  0x0a: "network version", 0x0b: "network flash", 0x13: "battery", 0x17: "sample query",
+  0x18: "?", 0x19: "read memory int", 0x1a: "goal", 0x1c: "?", 0x1f: "model?",
+  0x21: "assessment metrics", 0x24: "battery?", 0x25: "fuel", 0x28: "?",
+  0x31: "time", 0x32: "24-hour", 0x33: "metric", 0x34: "weight", 0x35: "height",
+  0x36: "age", 0x37: "display loop", 0x38: "orientation", 0x39: "goal options",
+  0x3a: "gender", 0x3b: "display format", 0x40: "timestamp", 0x41: "?", 0x42: "?",
+  0x50: "?", 0x51: "get desktop data", 0x52: "set desktop data", 0x60: "protocol version",
+  0xbb: "memory read", 0xce: "progress", 0xdf: "status", 0xe0: "model",
+  0xe1: "serial", 0xe2: "hw revision", 0xf2: "firmware image",
+};
+
+// Map the firmware's actual command surface. Per the DLL's own convention
+// (handler at 0x10037C20) an EMPTY response body means "operation not
+// recognized by firmware", so a bare opcode tells us whether F2.12 implements
+// it at all. Comparing the recognised set against the DLL's table discriminates:
+//
+//   opcodes recognised that the DLL never uses  -> F2.12 has its own commands (A)
+//   recognised set == the DLL's read commands   -> no host write path here (B)
+//
+// SAFETY: 0x0b (network flash), 0xf2 (firmware image) and the chunked-transfer
+// opcodes 0x07/0x09 are skipped. Others are sent bare, with no arguments.
+// On a factory-blank band the destructive commands have nothing to destroy
+// (reset/restoreDefaults = already factory, eeprom-erase = empty store) and
+// latchup/bootblock recover by replugging or the ~10s button reset.
+const SURFACE_SKIP = new Set([0x07, 0x09, 0x0b, 0xf2]);
+
+async function surfaceMap(dev, start = 0x00, end = 0xff) {
+  console.log(`\n=== COMMAND SURFACE MAP (0x${start.toString(16)}–0x${end.toString(16)}) ===`);
+  console.log("empty response body = not recognised by firmware (DLL convention)\n");
+  const recognised = [];
+  for (let op = start; op <= end; op++) {
+    if (SURFACE_SKIP.has(op)) { console.log(`  0x${op.toString(16).padStart(2,"0")}  [skipped — unsafe]`); continue; }
+    outWrite(dev, frameData([op]));
+    await delay(45);
+    const r = tryRead(dev, 4);
+    const d = r.data || [];
+    const body = d.length > 2 ? Array.prototype.slice.call(d, 3) : [];
+    if (body.length) {
+      const note = KNOWN_OPCODES[op] ? `DLL: ${KNOWN_OPCODES[op]}` : "*** NOT IN DLL TABLE ***";
+      recognised.push([op, body, note]);
+      console.log(`  0x${op.toString(16).padStart(2,"0")}  RECOGNISED  ${hex(body).slice(0,36)}   ${note}`);
+    }
+  }
+  console.log(`\n=== ${recognised.length} opcode(s) recognised ===`);
+  const novel = recognised.filter(([op]) => !KNOWN_OPCODES[op]);
+  if (novel.length) {
+    console.log(`${novel.length} recognised but NOT in the DLL's table — candidates for an F2.12-specific path:`);
+    for (const [op, body] of novel) console.log(`  0x${op.toString(16).padStart(2,"0")}  ${hex(body).slice(0,36)}`);
+    console.log("\n-> supports hypothesis A: this firmware exposes commands the Windows DLL never used.");
+  } else {
+    console.log("Every recognised opcode is already in the DLL's table — no F2.12-specific commands found.");
+    console.log("-> supports hypothesis B: no separate host write path on this firmware.");
+  }
+}
+
 async function imprintedBit(dev) {
   const s = await readSystem(dev, [0xdf]);
   return { raw: s, bit: s && s.length ? (s[0] & 1) : null };
@@ -1057,6 +1115,13 @@ async function dumpMemory(dev, maxBytes = 320) {
     } else if (process.argv.includes("--imprint2")) {
       await identity(dev);
       await imprint2(dev);
+    } else if (process.argv.includes("--surface")) {
+      const ai = process.argv.indexOf("--surface");
+      const a = process.argv[ai + 1], b = process.argv[ai + 2];
+      const start = a && /^[0-9a-fA-Fx]+$/.test(a) ? parseInt(a, 16) : 0x00;
+      const end = b && /^[0-9a-fA-Fx]+$/.test(b) ? parseInt(b, 16) : 0xff;
+      await identity(dev);
+      await surfaceMap(dev, start, end);
     } else if (process.argv.includes("--commit")) {
       await identity(dev);
       await commitTest(dev);
