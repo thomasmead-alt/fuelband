@@ -646,6 +646,83 @@ async function ladder(dev) {
   console.log(`imprinted bit: ${st.bit}`);
 }
 
+// Query whatever state a bare 0x51 reports. The fuzz showed this returns
+// 01 07 51 00 00 00 00 00 00 — six bytes that look like [status][offset:3][..].
+// If those bytes move after a transfer, the payload is being STAGED even though
+// the flash region still reads 0xff, which would mean we only need the commit.
+async function transferState(dev, label) {
+  const forms = [
+    ["bare 51", [0x51]],
+    ["51+len", [0x51, 0x09]],
+  ];
+  const out = [];
+  for (const [n, cmd] of forms) {
+    outWrite(dev, frameData(cmd));
+    await delay(60);
+    const r = tryRead(dev, 4);
+    out.push(`${n}: ${r.error ? "ERR" : hex(r.data)}`);
+  }
+  console.log(`  state ${label}: ${out.join("  |  ")}`);
+  return out.join("|");
+}
+
+// Candidate commit/save opcodes. Deliberately NOT a blind sweep: these are
+// entries that appear in the DLL's command table but have no identifying
+// completion string, which is what a no-response command like "save all
+// programmable parameters to flash" looks like. Known-destructive commands
+// (reset, restoreDefaults, eeprom-erase, latchup, bootblock, network-flash,
+// firmware-image) are excluded by construction.
+const COMMIT_CANDIDATES = [
+  [[0x28], "0x28  table entry, no completion string — best save candidate"],
+  [[0x50], "0x50  adjacent to the desktop-data pair"],
+  [[0x53], "0x53  adjacent to the desktop-data pair"],
+  [[0x54], "0x54  adjacent to the desktop-data pair"],
+];
+
+// Does a transfer stage, and can we commit it?
+async function commitTest(dev) {
+  console.log("\n=== STAGE / COMMIT TEST ===");
+  const payload = Array.from({ length: 54 }, (_, i) => i);
+
+  console.log("\n1. transfer state BEFORE any write");
+  const before = await transferState(dev, "before");
+
+  console.log("\n2. sending 54B payload through the transfer");
+  const xfer = new FuelBandTransfer(dev, { verbose: false });
+  const replies = await xfer.send(payload);
+  console.log(`  ${replies.length} chunks, replies: ${replies.map((r) => hex(r)).join(" | ")}`);
+
+  console.log("\n3. transfer state AFTER the write");
+  const after = await transferState(dev, "after ");
+  if (after !== before) {
+    console.log("  *** STATE CHANGED — the band is tracking our transfer (staging works). ***");
+  } else {
+    console.log("  state identical — no evidence the transfer was staged.");
+  }
+
+  console.log("\n4. trying commit candidates (read-back after each)");
+  const head = async () => {
+    const r = await readDesktop(dev, 0);
+    return hex(Array.prototype.slice.call(r, 7, 7 + 16));
+  };
+  const baseline = await head();
+  console.log(`  region before commits: ${baseline}`);
+  for (const [cmd, note] of COMMIT_CANDIDATES) {
+    outWrite(dev, frameData(cmd));
+    await delay(120);
+    const r = tryRead(dev, 4);
+    await delay(200);
+    const now = await head();
+    const changed = now !== baseline;
+    console.log(`  ${note}\n      reply: ${r.error ? "ERR" : hex(r.data)}   region: ${now}${changed ? "   *** CHANGED ***" : ""}`);
+    if (changed) { console.log("\n  *** COMMIT FOUND — that opcode flushed the staged data. ***"); return; }
+  }
+
+  console.log("\nNo candidate committed. If state DID change in step 3, the transfer is");
+  console.log("landing and only the commit opcode is missing — worth widening that list.");
+  console.log("If state did NOT change, the band isn't accepting the 83 a2 form at all.");
+}
+
 async function imprintedBit(dev) {
   const s = await readSystem(dev, [0xdf]);
   return { raw: s, bit: s && s.length ? (s[0] & 1) : null };
@@ -954,6 +1031,9 @@ async function dumpMemory(dev, maxBytes = 320) {
     } else if (process.argv.includes("--imprint2")) {
       await identity(dev);
       await imprint2(dev);
+    } else if (process.argv.includes("--commit")) {
+      await identity(dev);
+      await commitTest(dev);
     } else if (process.argv.includes("--ladder")) {
       await identity(dev);
       await ladder(dev);
