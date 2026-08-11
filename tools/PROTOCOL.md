@@ -138,10 +138,43 @@ against full disassembly of individual handlers.
 | `0x1f` | sync finished | needs an LSO parameter |
 | `0x07` `0x09` `0x0b` `0xf2` | transfers / network flash / firmware image | do not send casually |
 
-Opcodes the band answers that appear **nowhere in the DLL**: `0x02`, `0x05`
-(returns 8 bytes, e.g. `06 06 7e 81 1a 81 18 12` — possibly a unique ID),
-`0x06` (`06 01`), `0x0d`, `0x0e`. F2.12 does expose commands the Windows plugin
-never used.
+### Full command-surface sweep (07-wrapped, whole opcode space)
+
+F2.12 answers a number of opcodes that appear **nowhere in the DLL**. Values
+below are from factory-state bands.
+
+| opcode | reply | reading |
+|---|---|---|
+| `0x02` | `00` | |
+| `0x05` | `06 06 7e 81 1a 81 18 12` | 8 bytes, possibly a unique ID |
+| `0x06` | `06 01` | |
+| `0x0d` | `00 00 00 00 00 00` | |
+| `0x0e` | `00` | |
+| `0x15` | `01 0f a7 0f c3 07 d0 01 a5 09 0b 86` | contains `07 d0` = the goal written to that band — a summary/daily record |
+| `0x1d` | `02 02` | |
+| `0x26` | `00 00 00 01 00 00 00 01` | two BE32 `1`s |
+| `0x27` | `00` | |
+| `0x2a`, `0x2b` | `00 00 00` | same 3-byte width as fuel/goal — plausibly steps and calories |
+| `0x54` | `02` | |
+| `0xc2` | `ff…ff d6 c3 4a 37 34 23` | trailing 6 bytes look like a **BLE MAC address** |
+| `0xcb` | `00 00` | |
+| `0xcc` | `00` | |
+| `0xcd` | `00 00 01 00 55 06 00 6e 06 00 6e 06` | repeating 16-bit values ~1621/1646 — sensor/ADC readings? |
+| `0xd0` | `cc` | |
+| `0xde` | `01` | |
+| `0xee` | `00 04 6c 00` | |
+| `0xf1` | `01` | |
+| `0xf3` | `00 00 00 00` | |
+| `0xf4` | `05 00 01 00 00 00 01 00` | |
+| `0xff` | `36 64 08 10` | build/calibration constant? |
+
+`0x43`–`0x7f` is essentially barren: only `0x50`, `0x52`, `0x54` and `0x60`
+answer, and all four return the identical byte `02` — a status code (probably
+"needs arguments") rather than data. The meaningful surface is below `0x43`.
+
+**No activation command was found.** The whole opcode space has now been swept
+(excluding the transfer/flash opcodes, `0x14`, and `0x1c`) and nothing behaves
+like a switch that sets the imprinted bit.
 
 ---
 
