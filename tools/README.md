@@ -1,15 +1,16 @@
 # FuelBand native tool
 
-The in-browser app can connect to the original FuelBand over WebHID and read
-its report layout, but it **cannot read data back**: this band answers only on
-raw `GET_REPORT`/`SET_REPORT` control transfers using report IDs 9–12, and
-WebHID refuses feature transfers on any report ID the descriptor doesn't
-declare (only 113 here, which itself won't read). That's a browser security
-limit, not a band problem.
+Talks to a first-generation Nike+ FuelBand (`11ac:6565`) over USB using
+**hidapi** (`node-hid`).
 
-This tool talks to the band with **hidapi** (via `node-hid`), which has no such
-restriction — the same mechanism the original `libfuelband` and
-`rbrune/fuelband-usb` projects used.
+The browser can't do this job. WebHID only permits feature transfers on report
+IDs the descriptor declares — here just ID 113, which won't read — and the band
+never emits input-report events, so every read fails from a browser. hidapi has
+no such restriction, the same way the original `libfuelband` and
+`rbrune/fuelband-usb` projects worked.
+
+The protocol, the config-block format, and the state of the imprint
+investigation are documented in **[`PROTOCOL.md`](PROTOCOL.md)**.
 
 ## Run it
 
@@ -19,56 +20,47 @@ npm install
 node fuelband-dump.js
 ```
 
-- `npm install` pulls `node-hid` (prebuilt binaries; no compiler needed on
-  Windows/macOS). On **Linux** you may need libusb/hidraw dev packages, e.g.
-  `sudo apt install libusb-1.0-0` and a udev rule granting access to
-  `11ac:6565`.
-- On **Linux** you may need to run with `sudo` (or add the udev rule) so the
-  process can open the device.
+`npm install` pulls `node-hid` (prebuilt; no compiler needed on macOS/Windows).
+On **Linux** you may need `libusb-1.0-0` plus a udev rule for `11ac:6565`, or
+`sudo`, so the process can open the device.
 
-## What it does
+## Commands
 
-1. **Probes** the band with several command framings (libfuelband's
-   write-feature-on-9–12 / read-feature-on-4, rbrune's `01 len 07 …`, and async
-   input reports) and prints every reply as hex.
-2. **Dumps** the "desktop data" memory block (`bb 50 37 36 …`) and writes it to
-   `fuelband-dump.bin`, printing the payload hex.
+Read-only — safe to run any time:
 
-Paste the output back and we use it to (a) confirm which framing the band
-answers on, and (b) locate the fuel/steps field by matching a number read off
-the band's display against the dumped bytes. Once the offset is known, the web
-app can decode and display it.
+| command | what it does |
+|---|---|
+| `node fuelband-dump.js` | probe both framings, then dump the desktop region |
+| `--recon` | baseline: identity, status, battery, all timestamps, account region |
+| `--status` | status `0xdf`, decodes the **imprinted** bit (bit 0) |
+| `--read-config` | desktop config block via `0x51` |
+| `--memsweep` | sweep the desktop partition for any non-`0xff` bytes |
+| `--readmem <hexStart> <hexLen>` | read via `0x19` (workout sample store) |
+| `--find <number>` | scan readable regions for a value shown on the band |
 
-`node fuelband-dump.js --dump` skips the probes and goes straight to a dump.
+Write attempts — these send commands that try to change device state. None have
+committed anything so far; all are recoverable with the band's hardware reset
+(hold the button ~10s until RESET flashes):
 
-## Finding the fuel value
+| command | what it does |
+|---|---|
+| `--set-clock` | send `0x31` with the current time, then verify |
+| `--fuzz` | sweep write framings, report which ones the band *engages* with |
+| `--writetest`, `--writetest2`, `--writetest3` | write-structure searches, each verified by region read-back |
+| `--fuzzwrite` | sweep opcodes looking for one that writes the region |
+| `--imprint`, `--imprint2` | build and write a config blob, sweeping `imprint_state` |
 
-Once you can read a number off the band's display (fuel or steps), search for
-it directly:
+## Current state
 
-```sh
-node fuelband-dump.js --find 2417
-```
+Reads all work: identity, serial, firmware, status, battery, timestamps,
+account region, and the desktop config region.
 
-This reads the identity, pages the account region (`43 19`), reads the
-desktop-data block, and reports any offset where that number appears as a
-2/3/4-byte little- or big-endian value. A hit pins down where the fuel field
-lives; from there the reader can be locked in.
+Writes do not. The test band is factory-blank (32,816 bytes swept, all `0xff`;
+imprinted bit = 0) and shows the "connect to USB" prompt. Setting the clock is
+acknowledged but does not initialize it — imprinting needs a valid
+`DesktopOptions` blob whose leading fields (`DIN`, `UDI`,
+`device group config id`) are Nike account-issued values, and those servers shut
+down in 2018.
 
-## Initializing a fresh band (set the clock)
-
-A factory/reset band shows a "connect to USB" screen and won't track fuel until
-its clock is set — the job the discontinued Nike+ Connect app did. That exact
-command was extracted from the app (see `PROTOCOL.md`): opcode `0x31` with a
-big-endian time, GMT offset, and DST minutes. To send it with your current
-time:
-
-```sh
-node fuelband-dump.js --set-clock
-```
-
-It reads the clock, writes the current time, re-reads to verify, and tells you
-to check whether the band left the setup screen. This writes to the band, but
-it's the same benign command the official app used, and the band's hardware
-reset (hold the button ~10s until RESET flashes) restores factory state if
-anything looks off.
+See [`PROTOCOL.md` §5](PROTOCOL.md) for the write investigation, the
+verification oracles, and what's left to try.
