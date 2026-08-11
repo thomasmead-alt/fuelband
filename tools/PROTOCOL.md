@@ -368,6 +368,81 @@ the firmware or a capture of a real session.
 - **FuelBand SE route** — different device (BLE, keyless auth, settings
   `FUEL=48 / CALORIES=49 / STEPS=50`); irrelevant to this hardware.
 
+## 7a. What the Android app adds (`nike-fuelband.apk`, Apr 2015)
+
+Decompiled with androguard. The app targets the **FuelBand SE over BLE**
+("Copperhead" protocol), not this band's USB path, but it answers the
+provisioning question directly.
+
+### DIN is a server-issued UUID, and it is the auth key
+
+`Lfuelband/lb$a;->a(JSONObject)` parses a device record straight from a Nike
+service response — keys `serialNumber`, `deviceId`, `firmwareVersion`,
+`softwareVersion`, `manufacturer`, `deviceString`, `deviceType`, **`din`** — and
+writes it into a local SQLite `devices` table keyed by serial number.
+
+On connect (`Lcom/nike/fuel/device/v;->a`), the app reads the row back
+(`SELECT din FROM devices WHERE serial_number = ? AND din NOT NULL`) and logs
+either `DIN is null for serial number:` or **`Din used for BLE Auth key:`**.
+
+So the DIN is a **stored per-device secret obtained from Nike's service**. It is
+never computed on the client. That is the same `DIN` the desktop config blob
+carries as its first 48-byte field.
+
+### Key derivation (fully recovered)
+
+`Lfuelband/en;->a(String)[B`:
+
+```java
+UUID u = UUID.fromString(din);                        // the DIN is a UUID
+byte[] b = ByteBuffer.allocate(16)
+    .putLong(u.getMostSignificantBits())
+    .putLong(u.getLeastSignificantBits()).array();
+byte[] x = new byte[16];
+for (int i = 0; i < 16; i++) x[i] = (byte)(L[i] ^ b[i]);
+return MessageDigest.getInstance("MD5").digest(x);    // 16-byte auth key
+```
+
+with the hardcoded constant `L = Lfuelband/en;->l`:
+
+```
+b3 7e bf 75 c6 c7 19 24 a3 b1 88 4a 29 70 44 35
+```
+
+### The legacy fallback key is sixteen 0xFF bytes
+
+`Lfuelband/en;->a` is initialised as `new byte[16]` filled with `-1`. When no
+DIN row exists, `Lcom/nike/fuel/device/aa;->a` logs `Using legacy auth token`
+(and, on one branch, `Using legacy auth token.  Todd was wrong`) and
+authenticates with that all-`FF` array.
+
+This independently confirms the published SE result that an all-`FF` token
+authenticates, and explains *why*: it is Nike's own no-DIN fallback path, not a
+flaw discovered from outside.
+
+### The mobile client cannot write desktop data
+
+`NikeProtocolCoder_Copperhead$Cmd_DesktopData` (extends `Cmd_GenericMemoryBlock`)
+implements `decode()` by delegating to the generic memory-block reader, but
+`encode()` is:
+
+```java
+throw new ProtocolCoderException("desktop data functionality is not supported");
+```
+
+**Desktop-data writing was a Windows/USB-only capability.** There is no imprint
+or provisioning flow anywhere in the APK — no `imprint` string occurs in the
+dex at all. The phone consumes a DIN that the service already issued; it never
+creates one.
+
+### Bearing on this investigation
+
+This does **not** unblock the gen-1 USB write. Our band fails at command
+recognition, not authentication — there is no auth handshake in the USB
+protocol, so a key is not what is missing. What it does settle is the
+provisioning question: the identifiers in the config blob originate from Nike's
+service, keyed by serial number, and no client ever synthesised them.
+
 ## 8. Remaining paths
 
 Both remaining routes answer the same, now precisely-stated question: **does
