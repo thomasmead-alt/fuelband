@@ -969,6 +969,44 @@ async function probe2(dev) {
   console.log("\nAll reads. Nothing written.");
 }
 
+// doRunState (0x28). From the DLL the payload is built as:
+//   [0xf1][0x29][state][start-initiation-offset ...]
+// with the offset defaulting to 0x15180 (86400s = 1 day). The exact offset
+// width isn't certain, so both 3- and 4-byte forms are tried. Marker bytes
+// f1 29 are fixed ("doRunState need marker parameter").
+async function runState(dev) {
+  console.log("\n=== RUN-STATE (0x28) ===");
+  const snap = async (tag) => {
+    outWrite(dev, frameSys([0xdf]));
+    await delay(90);
+    const st = tryRead(dev, 1).data || [];
+    outWrite(dev, frameSys([0x21]));
+    await delay(90);
+    const tm = tryRead(dev, 1).data || [];
+    console.log(`  ${tag}: status ${hex(st)}   time ${hex(tm)}`);
+    return hex(st);
+  };
+  const base = await snap("before");
+
+  const OFF3 = [0x01, 0x51, 0x80];          // 86400 as 3 bytes BE
+  const OFF4 = [0x00, 0x01, 0x51, 0x80];    // 86400 as 4 bytes BE
+  const tries = [];
+  for (const state of [0x01, 0x02, 0x00]) {
+    tries.push([[0x28, 0xf1, 0x29, state, ...OFF3], `state ${state}, 3-byte offset`]);
+    tries.push([[0x28, 0xf1, 0x29, state, ...OFF4], `state ${state}, 4-byte offset`]);
+  }
+  for (const [cmd, label] of tries) {
+    outWrite(dev, frameSys(cmd));
+    await delay(140);
+    const r = tryRead(dev, 1).data || [];
+    const engaged = r.length > 3;
+    console.log(`\n  ${label}\n    sent ${hex(cmd)}\n    -> ${hex(r) || "-"}${engaged ? "  <DATA>" : ""}`);
+    const now = await snap("after ");
+    if (now !== base) console.log("    *** STATUS CHANGED ***");
+  }
+  console.log("\nUnplug and press the button — any display now?");
+}
+
 async function imprintedBit(dev) {
   const s = await readSystem(dev, [0xdf]);
   return { raw: s, bit: s && s.length ? (s[0] & 1) : null };
@@ -1277,6 +1315,9 @@ async function dumpMemory(dev, maxBytes = 320) {
     } else if (process.argv.includes("--imprint2")) {
       await identity(dev);
       await imprint2(dev);
+    } else if (process.argv.includes("--runstate")) {
+      await identity(dev);
+      await runState(dev);
     } else if (process.argv.includes("--probe2")) {
       await identity(dev);
       await probe2(dev);
