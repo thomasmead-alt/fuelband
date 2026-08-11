@@ -588,6 +588,64 @@ async function xferTest(dev, payload) {
   return exact || partial;
 }
 
+// Diagnostic ladder: three transfers that isolate different failure modes,
+// each verified by reading the desktop region back.
+//
+//   A  4 bytes   single chunk, flag 0 only — the path the real app never used
+//                (its blob is ~161B), so a failure here is weakly informative
+//   B  54 bytes  two chunks, flags 0 then 2 — exercises the final-marker
+//                rewrite at 0x10038912, but is not a valid DesktopOptions blob
+//   C  valid blob, correct length + CRC-16 — the only payload the firmware
+//                should accept if it validates before committing
+//
+// If C commits but B doesn't, the firmware validates before commit.
+// If B commits but C doesn't, the blob layout is wrong (transfer is fine).
+// If none commit, the inner packet is still wrong — but NOT the outer framing,
+// which readDesktop() already proves works over the same output-report path.
+async function ladder(dev) {
+  console.log("\n=== TRANSFER LADDER ===");
+  const readHead = async (n) => {
+    const r = await readDesktop(dev, 0);
+    return Array.prototype.slice.call(r, 7, 7 + n);
+  };
+
+  const tests = [
+    { name: "A single-chunk raw (4B, flag 0)", payload: [0xaa, 0xbb, 0xcc, 0xdd] },
+    { name: "B multi-chunk raw (54B, flags 0,2)", payload: Array.from({ length: 54 }, (_, i) => i) },
+    { name: "C valid blob (CRC-16, multi-chunk)", payload: buildConfigBlob(0x00000001, { clockAutoSet: 1 }) },
+  ];
+
+  const results = [];
+  for (const t of tests) {
+    console.log(`\n--- ${t.name} — ${t.payload.length}B ---`);
+    const before = await readHead(Math.min(t.payload.length, 16));
+    const xfer = new FuelBandTransfer(dev, { verbose: true });
+    await xfer.send(t.payload);
+    await delay(250);
+    const after = await readHead(Math.min(t.payload.length, 16));
+    const changed = after.some((b) => b !== 0xff);
+    const matches = after.filter((b, i) => b === t.payload[i]).length;
+    console.log(`  before: ${hex(before)}`);
+    console.log(`  after : ${hex(after)}`);
+    console.log(`  -> ${changed ? `REGION CHANGED (${matches}/${after.length} bytes match payload)` : "unchanged (all 0xff)"}`);
+    results.push({ name: t.name, changed, matches, of: after.length });
+  }
+
+  console.log("\n=== SUMMARY ===");
+  for (const r of results) {
+    console.log(`  ${r.changed ? "CHANGED" : "  --   "}  ${r.name}${r.changed ? `  (${r.matches}/${r.of} match)` : ""}`);
+  }
+  const anyChanged = results.some((r) => r.changed);
+  if (!anyChanged) {
+    console.log("\nNothing committed. Outer framing is NOT the suspect — readDesktop() uses the");
+    console.log("same output-report path and returns valid 0x3d replies. Next: the inner packet.");
+  } else {
+    console.log("\nWrite path is live. Next: confirm persistence (re-read after replug), then save-to-flash.");
+  }
+  const st = await imprintedBit(dev);
+  console.log(`imprinted bit: ${st.bit}`);
+}
+
 async function imprintedBit(dev) {
   const s = await readSystem(dev, [0xdf]);
   return { raw: s, bit: s && s.length ? (s[0] & 1) : null };
@@ -896,10 +954,13 @@ async function dumpMemory(dev, maxBytes = 320) {
     } else if (process.argv.includes("--imprint2")) {
       await identity(dev);
       await imprint2(dev);
+    } else if (process.argv.includes("--ladder")) {
+      await identity(dev);
+      await ladder(dev);
     } else if (process.argv.includes("--xfer")) {
       const ai = process.argv.indexOf("--xfer");
       const rest = process.argv.slice(ai + 1).filter((a) => /^[0-9a-fA-F]{1,2}$/.test(a));
-      const payload = rest.length ? rest.map((h) => parseInt(h, 16)) : [0xaa, 0xbb, 0xcc, 0xdd];
+      const payload = rest.length ? rest.map((h) => parseInt(h, 16)) : Array.from({ length: 54 }, (_, i) => i);
       await identity(dev);
       await xferTest(dev, payload);
     } else if (process.argv.includes("--fuzzwrite")) {
