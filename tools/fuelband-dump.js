@@ -987,12 +987,17 @@ async function probe2(dev) {
   console.log("\nAll reads. Nothing written.");
 }
 
-// doRunState (0x28). From the DLL the payload is built as:
-//   [0xf1][0x29][state][start-initiation-offset ...]
-// with the offset defaulting to 0x15180 (86400s = 1 day). The exact offset
-// width isn't certain, so both 3- and 4-byte forms are tried. Marker bytes
-// f1 29 are fixed ("doRunState need marker parameter").
-async function runState(dev) {
+// doRunState (0x28) — payload derived exactly from the DLL (fn 0x1003CFC0):
+//
+//   f1 29 <state>
+//   if (state & 1)  append (0x15180 - startInitiationOffset) as 4 bytes BIG-ENDIAN
+//                   startInitiationOffset defaults to 0, and is clamped to
+//                   0x1517f, so the default value is 0x00015180 (86400 = 1 day)
+//
+// The offset bytes are appended ONLY when bit 0 of state is set. There are
+// therefore exactly two well-formed commands; earlier guesses used a 3-byte
+// offset and a state value of 2, neither of which the DLL can produce.
+async function runState(dev, state = 1) {
   console.log("\n=== RUN-STATE (0x28) ===");
   const snap = async (tag) => {
     outWrite(dev, frameSys([0xdf]));
@@ -1004,71 +1009,24 @@ async function runState(dev) {
     console.log(`  ${tag}: status ${hex(st)}   time ${hex(tm)}`);
     return hex(st);
   };
-  const base = await snap("before");
-
-  const OFF3 = [0x01, 0x51, 0x80];          // 86400 as 3 bytes BE
-  const OFF4 = [0x00, 0x01, 0x51, 0x80];    // 86400 as 4 bytes BE
-  const tries = [];
-  for (const state of [0x01, 0x02, 0x00]) {
-    tries.push([[0x28, 0xf1, 0x29, state, ...OFF3], `state ${state}, 3-byte offset`]);
-    tries.push([[0x28, 0xf1, 0x29, state, ...OFF4], `state ${state}, 4-byte offset`]);
-  }
-  for (const [cmd, label] of tries) {
+  const cmd = (state & 1)
+    ? [0x28, 0xf1, 0x29, state, 0x00, 0x01, 0x51, 0x80]
+    : [0x28, 0xf1, 0x29, state];
+  const before = await snap("before");
+  console.log(`\n  sending state ${state}: ${hex(cmd)}`);
+  try {
     outWrite(dev, frameSys(cmd));
-    await delay(140);
+    await delay(160);
     const r = tryRead(dev, 1).data || [];
-    const engaged = r.length > 3;
-    console.log(`\n  ${label}\n    sent ${hex(cmd)}\n    -> ${hex(r) || "-"}${engaged ? "  <DATA>" : ""}`);
-    const now = await snap("after ");
-    if (now !== base) console.log("    *** STATUS CHANGED ***");
+    console.log(`  reply: ${hex(r) || "-"}${r.length > 3 ? "  <DATA>" : ""}`);
+  } catch (e) {
+    console.log(`  WRITE FAILED: ${e.message.split(":").pop().trim()}`);
+    console.log("  Unplug/replug the band before doing anything else.");
+    return;
   }
-  console.log("\nUnplug and press the button — any display now?");
-}
-
-// STRICTLY SAFE: unambiguous getters only. Every opcode here is a documented
-// read in the DLL and takes no state-changing action. No unknown opcodes, no
-// restoreDefaults/reset/latchup/bootblock candidates, nothing written.
-async function safeRead(dev) {
-  console.log("\n=== SAFE READ (getters only, nothing written) ===");
-  const GETTERS = [
-    [[0x08], "version"],
-    [[0xe1], "serial"],
-    [[0xe0], "model"],
-    [[0xe2], "hw revision"],
-    [[0xdf], "status"],
-    [[0x13], "battery"],
-    [[0x60], "protocol version"],
-    [[0x21], "clock"],
-    [[0x25, 0x00], "goal"],
-    [[0x31], "24-hour mode"],
-    [[0x24], "fuel"],
-  ];
-  for (const [cmd, label] of GETTERS) {
-    let d = [];
-    try {
-      outWrite(dev, frameSys(cmd));
-      await delay(90);
-      d = tryRead(dev, 1).data || [];
-    } catch (e) {
-      console.log(`  ${label.padEnd(18)} ERROR: ${e.message.split(":").pop().trim()}`);
-      continue;
-    }
-    const body = d.length > 3 ? Array.prototype.slice.call(d, 3) : [];
-    let extra = "";
-    if (label === "battery" && body.length >= 4)
-      // voltage is BIG-endian: band2 0f 76 = 3958 mV @69%, band1 10 5e = 4190 mV @100%.
-      // (little-endian gave 30223 / 24080 mV, which is nonsense.)
-      extra = `   -> ${body[0]}%, ${body[1] === 0x59 ? "charging" : "idle"}, ${((body[2] << 8) | body[3])} mV`;
-    if (label === "status" && body.length)
-      extra = `   -> imprinted(bit0)=${body[0] & 1}`;
-    if (label === "clock" && body.length >= 4) {
-      const t = ((body[0] << 24) | (body[1] << 16) | (body[2] << 8) | body[3]) >>> 0;
-      if (t > 946684800) extra = `   -> ${new Date(t * 1000).toISOString()}`;
-    }
-    if ((label === "serial" || label === "model") && body.length) extra = `   -> "${ascii(body)}"`;
-    console.log(`  ${label.padEnd(18)} ${hex(body) || "(empty)"}${extra}`);
-  }
-  console.log("\nRead-only. Nothing on the band was changed.");
+  const after = await snap("after ");
+  console.log(after !== before ? "\n  *** STATUS CHANGED ***" : "\n  status unchanged");
+  console.log("  Revert with:  --runstate 0");
 }
 
 async function imprintedBit(dev) {
@@ -1380,8 +1338,10 @@ async function dumpMemory(dev, maxBytes = 320) {
       await identity(dev);
       await imprint2(dev);
     } else if (process.argv.includes("--runstate")) {
+      const ri = process.argv.indexOf("--runstate");
+      const rs = process.argv[ri + 1];
       await identity(dev);
-      await runState(dev);
+      await runState(dev, /^[01]$/.test(rs || "") ? Number(rs) : 1);
     } else if (process.argv.includes("--safe")) {
       await identity(dev);
       await safeRead(dev);
