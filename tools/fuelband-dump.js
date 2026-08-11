@@ -940,6 +940,35 @@ async function activate(dev) {
   console.log("Then UNPLUG the band and press its button — does it show a clock?");
 }
 
+// Read-only state probe through the 07 wrapper — the framing the band answers
+// on. Reads the commands that only became reachable once the wrapper was found.
+async function probe2(dev) {
+  console.log("\n=== STATE PROBE (07-wrapped reads) ===");
+  const READS = [
+    [[0xdf], "status"],
+    [[0x21], "time"],
+    [[0x25, 0x00], "goal (type 0)"],
+    [[0x31], "24-hour"],
+    [[0x28], "run-state        (doRunState)"],
+    [[0x1f], "sync-finished    (doSyncFinished)"],
+    [[0x17], "sample-query"],
+    [[0x1a], "?0x1a"],
+    [[0x24], "?0x24"],
+    [[0x1c], "?0x1c  (restoreDefaults — READ ONLY, no args)"],
+    [[0x60], "protocol version"],
+    [[0x08], "version"],
+  ];
+  for (const [cmd, label] of READS) {
+    outWrite(dev, frameSys(cmd));
+    await delay(90);
+    const r = tryRead(dev, 1);
+    const d = r.data || [];
+    const live = d.length > 3;
+    console.log(`  ${label.padEnd(34)} ${hex(cmd).padEnd(8)} -> ${hex(d) || "-"}${live ? "  <DATA>" : ""}`);
+  }
+  console.log("\nAll reads. Nothing written.");
+}
+
 async function imprintedBit(dev) {
   const s = await readSystem(dev, [0xdf]);
   return { raw: s, bit: s && s.length ? (s[0] & 1) : null };
@@ -1248,6 +1277,9 @@ async function dumpMemory(dev, maxBytes = 320) {
     } else if (process.argv.includes("--imprint2")) {
       await identity(dev);
       await imprint2(dev);
+    } else if (process.argv.includes("--probe2")) {
+      await identity(dev);
+      await probe2(dev);
     } else if (process.argv.includes("--activate")) {
       await identity(dev);
       await activate(dev);
