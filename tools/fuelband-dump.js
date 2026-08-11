@@ -1056,7 +1056,9 @@ async function safeRead(dev) {
     const body = d.length > 3 ? Array.prototype.slice.call(d, 3) : [];
     let extra = "";
     if (label === "battery" && body.length >= 4)
-      extra = `   -> ${body[0]}%, ${body[1] === 0x59 ? "charging" : "idle"}, ${(body[2] | (body[3] << 8))} mV`;
+      // voltage is BIG-endian: band2 0f 76 = 3958 mV @69%, band1 10 5e = 4190 mV @100%.
+      // (little-endian gave 30223 / 24080 mV, which is nonsense.)
+      extra = `   -> ${body[0]}%, ${body[1] === 0x59 ? "charging" : "idle"}, ${((body[2] << 8) | body[3])} mV`;
     if (label === "status" && body.length)
       extra = `   -> imprinted(bit0)=${body[0] & 1}`;
     if (label === "clock" && body.length >= 4) {
