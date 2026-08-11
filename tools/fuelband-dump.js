@@ -793,11 +793,31 @@ const KNOWN_OPCODES = {
 // latchup/bootblock recover by replugging or the ~10s button reset.
 // 0x14 hung a real device (IOHIDDeviceSetReport I/O timeout) and required a
 // replug, so it is skipped alongside the transfer/flash opcodes.
-const SURFACE_SKIP = new Set([0x07, 0x09, 0x0b, 0x14, 0xf2]);
+// Skipped: chunked transfers (0x07/0x09), network flash (0x0b), firmware image
+// (0xf2), the opcode that latched a band off (0x14), and restoreDefaults (0x1c,
+// which would wipe the settings we have written).
+const SURFACE_SKIP = new Set([0x07, 0x09, 0x0b, 0x14, 0x1c, 0xf2]);
 
 async function surfaceMap(dev, start = 0x00, end = 0xff) {
   console.log(`\n=== COMMAND SURFACE MAP (0x${start.toString(16)}–0x${end.toString(16)}) ===`);
-  console.log("empty response body = not recognised by firmware (DLL convention)\n");
+  console.log("07-wrapped. Health-checked after every opcode; results written incrementally.\n");
+  const fs = require("fs");
+  const LOG = "surface-map.txt";
+  fs.appendFileSync(LOG, `\n--- sweep 0x${start.toString(16)}-0x${end.toString(16)} @ ${new Date().toISOString()} ---\n`);
+  // Confirm the band answers a known-good command; used to detect a wedge the
+  // moment it happens rather than on the next write.
+  const healthy = async () => {
+    try {
+      outWrite(dev, frameSys([0x08]));
+      await delay(60);
+      const d = tryRead(dev, 1).data || [];
+      return d.length > 3;
+    } catch { return false; }
+  };
+  if (!(await healthy())) {
+    console.log("Band is not answering the version command — aborting before we start.");
+    return;
+  }
   const recognised = [];
   for (let op = start; op <= end; op++) {
     if (SURFACE_SKIP.has(op)) { console.log(`  0x${op.toString(16).padStart(2,"0")}  [skipped — unsafe]`); continue; }
@@ -820,7 +840,18 @@ async function surfaceMap(dev, start = 0x00, end = 0xff) {
     if (body.length) {
       const note = KNOWN_OPCODES[op] ? `DLL: ${KNOWN_OPCODES[op]}` : "*** NOT IN DLL TABLE ***";
       recognised.push([op, body, note]);
-      console.log(`  0x${op.toString(16).padStart(2,"0")}  RECOGNISED  ${hex(body).slice(0,36)}   ${note}`);
+      const line = `  0x${op.toString(16).padStart(2,"0")}  RECOGNISED  ${hex(body).slice(0,36)}   ${note}`;
+      console.log(line);
+      fs.appendFileSync(LOG, line + "\n");
+    }
+    // Did this opcode wedge the band? Catch it now, while we know the culprit.
+    if (!(await healthy())) {
+      const msg = `  *** 0x${op.toString(16)} STOPPED THE BAND RESPONDING ***`;
+      console.log(msg);
+      fs.appendFileSync(LOG, msg + "\n");
+      console.log(`  Unplug, charge on a wall adapter, then resume with:  --surface ${(op+1).toString(16)} ${end.toString(16)}`);
+      console.log(`  Results so far are saved in tools/${LOG}`);
+      return;
     }
   }
   console.log(`\n=== ${recognised.length} opcode(s) recognised ===`);
