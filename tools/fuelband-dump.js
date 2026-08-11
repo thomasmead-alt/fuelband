@@ -679,48 +679,74 @@ const COMMIT_CANDIDATES = [
   [[0x54], "0x54  adjacent to the desktop-data pair"],
 ];
 
+// Issue a region selector in the READ form (no data bytes) to ask whether the
+// firmware knows that region at all. 0x503736 is the control: it must answer
+// 01 3d ... If 0x83a2xx answers 01 01 51, this firmware has no such region.
+async function regionProbe(dev) {
+  console.log("\n=== REGION EXISTENCE PROBE (read form, no data) ===");
+  const regions = [
+    [[0x50, 0x37, 0x36], "0x503736  desktop read  (CONTROL — must answer)"],
+    [[0x83, 0xa2, 0x00], "0x83a200  write, first chunk selector"],
+    [[0x83, 0xa2, 0x01], "0x83a201  write, continuation selector"],
+    [[0x83, 0xa2, 0x02], "0x83a202  write, final selector"],
+  ];
+  for (const [r, note] of regions) {
+    outWrite(dev, frameData([0x51, ...r, 0x00, 0x00, 0x00]));
+    await delay(80);
+    const rep = tryRead(dev, 4);
+    const d = rep.data || [];
+    const known = d.length > 3;
+    console.log(`  ${note}\n      -> ${rep.error ? "ERR " + rep.error : hex(d).slice(0, 44)}   ${known ? "REGION EXISTS" : "not recognised"}`);
+  }
+}
+
 // Does a transfer stage, and can we commit it?
 async function commitTest(dev) {
   console.log("\n=== STAGE / COMMIT TEST ===");
-  const payload = Array.from({ length: 54 }, (_, i) => i);
+  await regionProbe(dev);
 
-  console.log("\n1. transfer state BEFORE any write");
-  const before = await transferState(dev, "before");
+  const payloads = [
+    ["A 4B  single chunk", [0xaa, 0xbb, 0xcc, 0xdd]],
+    ["B 54B two chunks  ", Array.from({ length: 54 }, (_, i) => i)],
+    ["C valid blob      ", buildConfigBlob(0x00000001, { clockAutoSet: 1 })],
+  ];
 
-  console.log("\n2. sending 54B payload through the transfer");
-  const xfer = new FuelBandTransfer(dev, { verbose: false });
-  const replies = await xfer.send(payload);
-  console.log(`  ${replies.length} chunks, replies: ${replies.map((r) => hex(r)).join(" | ")}`);
-
-  console.log("\n3. transfer state AFTER the write");
-  const after = await transferState(dev, "after ");
-  if (after !== before) {
-    console.log("  *** STATE CHANGED — the band is tracking our transfer (staging works). ***");
-  } else {
-    console.log("  state identical — no evidence the transfer was staged.");
+  console.log("\n=== TRANSFER STATE PER PAYLOAD ===");
+  const baseline = await transferState(dev, "baseline");
+  const seen = [["baseline", baseline]];
+  for (const [name, payload] of payloads) {
+    const xfer = new FuelBandTransfer(dev, { verbose: false });
+    await xfer.send(payload);
+    await delay(150);
+    const st = await transferState(dev, name);
+    seen.push([name, st]);
   }
+  const moved = seen.slice(1).filter(([, s]) => s !== baseline).map(([n]) => n.trim());
+  console.log(moved.length
+    ? `\n  *** STATE MOVED after: ${moved.join(", ")} — something is being staged. ***`
+    : "\n  state identical after every payload — nothing is being staged.");
 
-  console.log("\n4. trying commit candidates (read-back after each)");
+  console.log("\n=== COMMIT CANDIDATES (read-back after each) ===");
   const head = async () => {
     const r = await readDesktop(dev, 0);
     return hex(Array.prototype.slice.call(r, 7, 7 + 16));
   };
-  const baseline = await head();
-  console.log(`  region before commits: ${baseline}`);
+  const regionBase = await head();
+  console.log(`  region before commits: ${regionBase}`);
   for (const [cmd, note] of COMMIT_CANDIDATES) {
     outWrite(dev, frameData(cmd));
     await delay(120);
     const r = tryRead(dev, 4);
     await delay(200);
     const now = await head();
-    const changed = now !== baseline;
+    const changed = now !== regionBase;
     console.log(`  ${note}\n      reply: ${r.error ? "ERR" : hex(r.data)}   region: ${now}${changed ? "   *** CHANGED ***" : ""}`);
     if (changed) { console.log("\n  *** COMMIT FOUND — that opcode flushed the staged data. ***"); return; }
   }
 
-  console.log("\nNo candidate committed. If state DID change in step 3, the transfer is");
-  console.log("landing and only the commit opcode is missing — worth widening that list.");
-  console.log("If state did NOT change, the band isn't accepting the 83 a2 form at all.");
+  console.log("\nNo candidate committed. Read the two sections above together:");
+  console.log("  region exists + state moved -> transfer lands, only the flush is missing");
+  console.log("  region NOT recognised       -> this firmware has no 0x83a2xx; static analysis ends here");
 }
 
 async function imprintedBit(dev) {
