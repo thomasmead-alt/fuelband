@@ -19,7 +19,18 @@ See [Current approach](#current-approach-the-write-problem).
 |---|---|
 | Device | Nike+ FuelBand, 1st gen (not SE) |
 | USB ID | `11ac:6565` |
-| Test unit serial | `20M9FC5V01660`, firmware `46 0c 02 61 4f 58 3d` |
+| Test unit serial | `20M9FC5V01660` |
+| Test unit firmware | **F2.12** — raw `46 0c 02 61 4f 58 3d` |
+
+The version handler (`0x100408D0`) formats it as `sprintf("%c%u.%u", r[0], r[2], r[1])`
+— note **`r[2]` is major and `r[1]` is minor**, so the raw bytes `46 0c 02` read
+`F2.12`, not `F12.2`. (An earlier revision of this document had them transposed.)
+
+The DLL calls the main processor the **MSP** (`<command name='version'
+description='Get the MSP firmware version number'>`), with a separate **network
+processor (NP)** that has its own version/boot/reset/stage/flash commands. That
+points at a TI MSP430 for the application core rather than the STM32 an earlier
+note assumed — see §8 before buying a debug probe.
 
 ### HID report descriptor (read off the real device)
 
@@ -248,6 +259,27 @@ expects a successful write to be **immediately visible to the same read**.
 
 ### What the band actually does
 
+### What `01 01 51` means — per Nike's own code
+
+The completion handler at `0x10037C20` defines the convention:
+
+```
+len = response.length()
+if (len == 0)   -> "operation not recognized by firmware"
+else if (r[0])  -> "ERROR"
+else            -> "OK"
+```
+
+Our write replies are `01 01 51` = report ID, length 1, opcode, and **zero
+payload bytes** — an empty response body. By the DLL's own definition that is
+*operation not recognized by firmware*, not a silent accept. This settles the
+earlier ambiguity about whether the writes were being taken and staged.
+
+Note also that the DLL contains **no firmware-version gate on the desktop-data
+path** — it does not branch by version before sending the write. The only
+known/unknown version check is for the *bootloader* (`device.bootloader.version-is-unknown`,
+set when a system-reserved field reads zero), unrelated to this.
+
 | test | result |
 |---|---|
 | `0x31` set clock (feature-write, then output-report, both framings) | acked, no effect |
@@ -346,13 +378,23 @@ firmware `F 12.2` implement region `0x83a2xx`, and what gates it?**
    session that static analysis wouldn't attribute to the desktop-data path. If
    a capture shows `0x83a2xx` sent and ignored, the firmware-gate hypothesis
    becomes dominant. Gated on whether the 2015-era app still launches.
-2. **Hardware firmware dump via SWD** — the band is an STM32L15x (Cortex-M3);
-   SWDIO = PA13, SWCLK = PA14, NRST = pin 7. Read the RDP option byte first:
-   RDP 0 = dumpable (`dump_image fuelband.bin 0x08000000 0x60000`), RDP 1 =
-   flash reads blocked and lowering it mass-erases, RDP 2 = debug permanently
-   off. A shipped consumer product is most likely RDP 1. In the firmware, the
-   CRC-16 table (`0x1021`) is a recognizable landmark — the desktop-data parser
-   and the imprint check sit near it.
+2. **Hardware firmware dump.** *Identify the silicon before buying a probe.* The
+   DLL calls the application core the **MSP**, which points at a **TI MSP430**,
+   not the STM32 an earlier revision of this document assumed. That changes the
+   toolchain completely:
+
+   - **MSP430** debugs over **JTAG or Spy-Bi-Wire** (2-wire: `TEST`/`SBWTCK`,
+     `RST`/`SBWTDIO`) using an MSP-FET / TI LaunchPad and `mspdebug`. Protection
+     is a **JTAG fuse** (blown = irreversible lockout, no recovery) plus an
+     optional BSL password — *not* STM32-style RDP levels, and there is no
+     "lower the protection and mass-erase" middle ground.
+   - Open the case and read the chip markings first. If it really is an STM32,
+     the SWD route applies instead (SWDIO/SWCLK/NRST, check the RDP option byte,
+     `dump_image fuelband.bin 0x08000000 0x60000`).
+
+   Whatever the core, the CRC-16/XMODEM table (poly `0x1021`) is a recognisable
+   landmark in the dump; the desktop-data parser and the handler that consumes
+   `51 83 a2 …` should sit near it.
 
 ---
 
