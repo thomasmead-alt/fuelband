@@ -791,7 +791,9 @@ const KNOWN_OPCODES = {
 // On a factory-blank band the destructive commands have nothing to destroy
 // (reset/restoreDefaults = already factory, eeprom-erase = empty store) and
 // latchup/bootblock recover by replugging or the ~10s button reset.
-const SURFACE_SKIP = new Set([0x07, 0x09, 0x0b, 0xf2]);
+// 0x14 hung a real device (IOHIDDeviceSetReport I/O timeout) and required a
+// replug, so it is skipped alongside the transfer/flash opcodes.
+const SURFACE_SKIP = new Set([0x07, 0x09, 0x0b, 0x14, 0xf2]);
 
 async function surfaceMap(dev, start = 0x00, end = 0xff) {
   console.log(`\n=== COMMAND SURFACE MAP (0x${start.toString(16)}–0x${end.toString(16)}) ===`);
@@ -801,10 +803,19 @@ async function surfaceMap(dev, start = 0x00, end = 0xff) {
     if (SURFACE_SKIP.has(op)) { console.log(`  0x${op.toString(16).padStart(2,"0")}  [skipped — unsafe]`); continue; }
     // 07-wrapped framing — the form the band actually answers on. The first
     // version of this sweep used the data framing and would have found nothing.
-    outWrite(dev, frameSys([op]));
-    await delay(45);
-    const r = tryRead(dev, 1);
-    const d = r.data || [];
+    // Writes are guarded: an opcode can wedge the device (0x14 did), and we want
+    // the map so far rather than a stack trace.
+    let d = [];
+    try {
+      outWrite(dev, frameSys([op]));
+      await delay(45);
+      d = tryRead(dev, 1).data || [];
+    } catch (e) {
+      console.log(`  0x${op.toString(16).padStart(2,"0")}  *** DEVICE STOPPED RESPONDING — ${e.message.split(":").pop().trim()}`);
+      console.log(`\n  Sweep aborted at 0x${op.toString(16)}. Unplug/replug the band (hold the button ~10s if needed).`);
+      console.log(`  Resume past it with:  --surface ${(op+1).toString(16)} ff`);
+      break;
+    }
     const body = d.length > 3 ? Array.prototype.slice.call(d, 3) : [];
     if (body.length) {
       const note = KNOWN_OPCODES[op] ? `DLL: ${KNOWN_OPCODES[op]}` : "*** NOT IN DLL TABLE ***";
