@@ -890,7 +890,11 @@ const OP = {
   time: 0x21,        // [time:4 BE][gmtOffset:4 BE][dstMinutes:1]   (doTime)
   goal: 0x25,        // [type:1][goal:3 BE]                          (doGoal)
   is24Hour: 0x31,    // [bool:1]                                     (do24Hour)
+  displayLoop: 0x3a, // [screenIdx…]  Fuel0 Time1 Goal2 Cal3 Dist4 Steps5 (doDisplayLoop)
 };
+
+// Screen-index enum from FuelBandPlugin.dll's "loop" XML enum, in order.
+const LOOP_SCREENS = { fuel: 0, time: 1, goal: 2, calories: 3, distance: 4, steps: 5 };
 
 // Send a command through BOTH framings and report which one the band engages
 // with. Identity/status commands answer on the 07-tagged framing (feat#1);
@@ -941,6 +945,59 @@ async function setClock2(dev) {
       if (t > 1500000000 && t < 2000000000) console.log(`  -> decoded time @${off}: ${new Date(t*1000).toString()}`);
     }
   }
+}
+
+// Write the on-band display loop (doDisplayLoop, opcode 0x3a). The loop is the
+// ordered list of screens the band cycles through on a button press. Payload is
+// just the screen indices, one byte each, from the DLL's "loop" enum:
+//   Fuel=0  Time=1  Goal=2  Calories=3  Distance=4  Steps=5
+// The DLL's own factory default for this field is the string "0,1" -> Fuel,Time,
+// so that's the default we send here (a value Nike's firmware itself ships with).
+//
+// Hypothesis under test: a factory-blank band shows only the "connect to USB"
+// prompt. If the clock face is gated on the display-loop config rather than on
+// the imprint bit, writing a Time-containing loop should let the band show a
+// clock once unplugged. (Caveat: a provisioned reference band already carries
+// Time in its loop yet a blank band doesn't display it — so this is a long shot,
+// but it's a DLL-named command and cheap to try.)
+async function setDisplayLoop(dev, screens = [LOOP_SCREENS.fuel, LOOP_SCREENS.time]) {
+  const cmd = [OP.displayLoop, ...screens];
+  const names = screens.map((i) => Object.keys(LOOP_SCREENS).find((k) => LOOP_SCREENS[k] === i) || `?${i}`);
+  console.log(`\n=== SET DISPLAY LOOP (opcode 0x${OP.displayLoop.toString(16)} — doDisplayLoop) ===`);
+  console.log(`screens: [${screens.join(",")}]  (${names.join(", ")})`);
+  console.log(`sent   : ${hex(cmd)}`);
+
+  const readBoth = async (label) => {
+    outWrite(dev, frameData([OP.displayLoop]));
+    await delay(120);
+    const d = tryRead(dev, 4).data || [];
+    await delay(60);
+    outWrite(dev, frameSys([OP.displayLoop]));
+    await delay(120);
+    const s = tryRead(dev, 1).data || [];
+    console.log(`  ${label} data#4: ${hex(d) || "-"}`);
+    console.log(`  ${label} sys #1: ${hex(s) || "-"}`);
+    return { d, s };
+  };
+
+  const before = await readBoth("before");
+  // Write through both framings — whichever one the firmware commits on, commits.
+  outWrite(dev, frameData(cmd));
+  await delay(150);
+  console.log(`  write data#4 reply: ${hex(tryRead(dev, 4).data || []) || "-"}`);
+  await delay(60);
+  outWrite(dev, frameSys(cmd));
+  await delay(150);
+  console.log(`  write sys #1 reply: ${hex(tryRead(dev, 1).data || []) || "-"}`);
+  await delay(150);
+  const after = await readBoth("after ");
+
+  const changed = hex(before.d) !== hex(after.d) || hex(before.s) !== hex(after.s);
+  console.log(changed
+    ? "  *** DISPLAY LOOP CHANGED — the write committed ***"
+    : "  unchanged (write not accepted, or read framing differs)");
+  console.log("\nNow UNPLUG the band and press its button — does it show a clock face?");
+  return changed;
 }
 
 // Set the daily fuel goal (doGoal: [type][goal:3 BE]).
@@ -1477,6 +1534,17 @@ async function dumpMemory(dev, maxBytes = 320) {
     } else if (process.argv.includes("--imprint2")) {
       await identity(dev);
       await imprint2(dev);
+    } else if (process.argv.includes("--displayloop")) {
+      // --displayloop [name|index ...]  (default: fuel time = DLL "0,1")
+      const di = process.argv.indexOf("--displayloop");
+      const rest = process.argv.slice(di + 1).filter((a) => !a.startsWith("--"));
+      let screens = [LOOP_SCREENS.fuel, LOOP_SCREENS.time];
+      if (rest.length) {
+        screens = rest.map((a) => /^\d+$/.test(a) ? Number(a) : LOOP_SCREENS[a.toLowerCase()])
+                      .filter((n) => Number.isInteger(n) && n >= 0 && n <= 5);
+      }
+      await identity(dev);
+      await setDisplayLoop(dev, screens);
     } else if (process.argv.includes("--fuzz-activation")) {
       await identity(dev);
       await fuzzActivation(dev);
