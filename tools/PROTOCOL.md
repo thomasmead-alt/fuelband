@@ -208,39 +208,79 @@ These are what make write attempts testable rather than blind:
 
 ---
 
-## 5. Current approach: the write problem
+## 5. The write path — reconstructed, and rejected by this firmware
 
-Every read works. **No write has ever committed.** Attempts so far:
+The app's write was reconstructed byte-for-byte from the transfer routine at
+`0x100386f0` (annotated dump: `disasm-transfer.txt`). A chunk is built in this
+exact append order:
 
-| # | attempt | result |
+```
+[extra][flag][off>>16][off>>8][off&0xff][data…]      sent as the body of 0x51
+```
+
+- `extra` = `83 a2`, supplied by `doSetDesktopData` (`0x1003AE10`) as arg4.
+- `flag` = `0` first chunk, `1` continuation, `2` final. The rewrite to `2` at
+  `0x10038912` is guarded by `test edx,edx; je`, so a **single-chunk transfer
+  keeps flag 0** and never produces a final marker.
+- Offset is the cumulative bytes-sent counter (`this+0x18c`), 24-bit big-endian.
+- Data budget: `0x3c - 6 - 1` = **53 bytes** per chunk.
+
+Device-side state lives entirely in the app's own object — `this+0x180` payload
+buffer, `this+0x18c` bytes sent, `this+0x190` transfer-complete flag. **Nothing
+is negotiated on the wire**: there is no BEGIN, no setup command, and no
+handshake. `FuelBandTransfer` in `fuelband-dump.js` implements this exactly.
+
+### The surrounding transaction has no finalize step
+
+Traced from `doSetDesktopData` entry to return: after the transfer call it sets
+async result `0xb`, frees the temp string, and returns — **it issues no further
+command**. The `Desktop Data readback: wrote %u bytes, read %u bytes` log lives
+in `completeGetDesktopData` (`0x1003AF40`), alongside `Creating DDB objects from
+data written and read back, for comparison` and `DDB's are equivalent.` So the
+app's real sequence is:
+
+```
+write chunks  ->  read the region back  ->  compare the two DDBs
+```
+
+No commit, no flush, no prepare/erase anywhere in the desktop-data path. The app
+expects a successful write to be **immediately visible to the same read**.
+
+### What the band actually does
+
+| test | result |
+|---|---|
+| `0x31` set clock (feature-write, then output-report, both framings) | acked, no effect |
+| A — 4B payload, single chunk (flag 0) | `01 01 51`, region unchanged |
+| B — 54B payload, two chunks (flags 0,2) | `01 01 51`, region unchanged |
+| C — 161B valid blob, 4 chunks (flags 0,1,1,2), correct CRC | `01 01 51`, region unchanged |
+| transfer-state sample (bare `0x51`) after each of A/B/C | identical to baseline — nothing staged |
+| commit candidates `0x28`, `0x50`, `0x53`, `0x54` | echo only, region unchanged |
+
+### Region-existence probe (decisive)
+
+If `83 a2 <flag>` is the low byte of a 24-bit region selector rather than a
+protocol prefix — which matches the read form `[opcode][region:3][offset:3]` —
+then the region can be probed directly in the read form:
+
+| region | reply | |
 |---|---|---|
-| 1 | `0x31` set clock, feature-write | acked, no effect |
-| 2 | `0x31` set clock, output-report, both framings | acked, no effect |
-| 3 | `0x51` chunked `[flag, off3, 83 a2, data]` (app's structure) | echo `01 01 51` |
-| 4 | full 161B blob, 4 chunks, same structure | echo; region stays `ff` |
-| 5 | 8 structures with `50 37 36` as address + `83 a2` marker | **engage — but interpreted as a read**; region stays `ff` |
-| 6 | opcode sweep `0x50–0x5f`, `0xb0–0xbf` + region selector + test pattern | *in progress* (`--fuzzwrite`) |
+| `0x503736` (control) | `01 3d 51 01 00 00 38 ff…` | **exists** |
+| `0x83a200` | `01 01 51` | not recognised |
+| `0x83a201` | `01 01 51` | not recognised |
+| `0x83a202` | `01 01 51` | not recognised |
 
-The finding from #5 is the important one: with the region selector present, the
-band treats the bytes after it as a **read address** regardless of what follows,
-and returns that location. `0x51`/`0x52` + `50 37 36` behave as read-only.
+**Conclusion.** This band does not act on the write form the 2015 Nike+ Connect
+DLL emits, under any construction we can produce, and stages nothing. Whether
+that is because region `0x83a2xx` does not exist in firmware `F 12.2`
+(`46 0c 02 61 4f 58 3d`), or because `83 a2` is a prefix requiring device state
+we cannot establish, is **not distinguishable from outside** — both produce the
+identical bare echo.
 
-Two hypotheses remain:
-
-- **A different opcode writes the region.** Memory-write commands are usually a
-  sibling of the read op — hence the sweep in #6, using region read-back to
-  detect a change. Ranges are restricted to `0x50–0x5f` / `0xb0–0xbf` to avoid
-  `reset`, `restoreDefaults`, `eeprom-erase`, `latchup` and `bootblock`.
-- **The write is a stateful transaction.** The app's transfer function
-  (`0x100386f0`) maintains transfer state on the device object (region address
-  `0x503736`, progress counters, a "more" flag) and streams CRC-validated chunks
-  that the firmware buffers and only commits on a complete, valid blob. Driven
-  command-at-a-time from outside, no partial write ever commits — which matches
-  everything observed.
-
-The write path also can't be debugged directly: write acknowledgements appear to
-come back on `HidD_GetInputReport`, which node-hid cannot poll on this device.
-So the only feedback is the coarse oracles in §4.
+Static analysis of the DLL is exhausted for this path: the packet construction,
+the transaction around it, and the absence of any finalize step are all now
+established facts, and the band still refuses. What remains is not "which packet
+did we miss" but "what does this firmware implement".
 
 ---
 
@@ -272,9 +312,14 @@ the firmware or a capture of a real session.
 
 ## 8. Remaining paths
 
-1. **USB capture of Nike+ Connect** (Wireshark + USBPcap on Windows) — the only
-   non-blind option. Shows the exact write bytes and transfer setup. Gated on
-   whether the 2015-era app still launches.
+Both remaining routes answer the same, now precisely-stated question: **does
+firmware `F 12.2` implement region `0x83a2xx`, and what gates it?**
+
+1. **USB capture of Nike+ Connect** (Wireshark + USBPcap on Windows) — shows
+   what the real app sends *to this band*, including anything earlier in the
+   session that static analysis wouldn't attribute to the desktop-data path. If
+   a capture shows `0x83a2xx` sent and ignored, the firmware-gate hypothesis
+   becomes dominant. Gated on whether the 2015-era app still launches.
 2. **Hardware firmware dump via SWD** — the band is an STM32L15x (Cortex-M3);
    SWDIO = PA13, SWCLK = PA14, NRST = pin 7. Read the RDP option byte first:
    RDP 0 = dumpable (`dump_image fuelband.bin 0x08000000 0x60000`), RDP 1 =
