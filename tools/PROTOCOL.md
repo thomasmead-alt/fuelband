@@ -443,6 +443,41 @@ protocol, so a key is not what is missing. What it does settle is the
 provisioning question: the identifiers in the config blob originate from Nike's
 service, keyed by serial number, and no client ever synthesised them.
 
+## 7b. Cross-version comparison of Nike+ Connect
+
+Three installer versions were extracted and compared, to test whether an older
+desktop app used a different (older) desktop-write form that this band's
+factory firmware might accept.
+
+| version | plugin | `do*` / `complete*` handlers | desktop write |
+|---|---|---|---|
+| 4.1.2.42 | `FuelbandPlugin.dll` | **2 / 3** | absent |
+| 5.3.8.37 | `FuelbandPlugin.dll` | 27 / 32 | `83 a2`, opcode `0x51` |
+| 6.6 | `FuelBandPlugin.dll` | 29 / 32 | `83 a2`, opcode `0x51` |
+
+**4.1.2.42's plugin is a near-stub** — two `do*` handlers in total. It parses
+`DesktopOptions` (the `.cc` name and "Cannot determine desktop data length from
+only %d bytes" are present) but implements almost no commands. Nike+ Connect 4.x
+predates mature FuelBand support, so its lack of `doSetDesktopData` reflects an
+immature *host application*, **not** evidence that the firmware command was
+introduced later. (An earlier reading of this comparison over-claimed that; it
+is not supported.)
+
+**5.3.8.37 and 6.6 are the same protocol.** Both build the chunk with the
+identical `0x3c` budget and the same `shr 0x10` / `and 0xff` × 3 big-endian
+offset construction, both use marker `83 a2`, both submit opcode `0x51`.
+
+So **no alternative desktop-write form exists in any shipped version.** The
+sequence we reconstructed is the only one Nike ever used over USB, and the
+band's rejection is not a host-version mismatch.
+
+Neither installer bundles a firmware image — Nike+ Connect downloaded firmware
+from its servers (`convert.fwversion` is the only firmware-file reference).
+That leaves one hypothesis this comparison *cannot* rule out: the band's factory
+firmware may predate the desktop-write command, with Nike+ Connect upgrading it
+on first connect via `doMainUpgrade` / the `0x09` image transfer. If so, the
+missing artifact is an archived FuelBand firmware image, not a protocol detail.
+
 ## 8. Remaining paths
 
 Both remaining routes answer the same, now precisely-stated question: **does
