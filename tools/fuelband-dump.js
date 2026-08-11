@@ -766,14 +766,22 @@ async function commitTest(dev) {
 
 // Opcodes the DLL's command table knows about, for cross-referencing.
 const KNOWN_OPCODES = {
-  0x07: "chunked transfer: NP image", 0x08: "version", 0x09: "chunked transfer: main FW image",
-  0x0a: "network version", 0x0b: "network flash", 0x13: "battery", 0x17: "sample query",
-  0x18: "?", 0x19: "read memory int", 0x1a: "goal", 0x1c: "?", 0x1f: "model?",
-  0x21: "assessment metrics", 0x24: "battery?", 0x25: "fuel", 0x28: "?",
-  0x31: "time", 0x32: "24-hour", 0x33: "metric", 0x34: "weight", 0x35: "height",
-  0x36: "age", 0x37: "display loop", 0x38: "orientation", 0x39: "goal options",
-  0x3a: "gender", 0x3b: "display format", 0x40: "timestamp", 0x41: "?", 0x42: "?",
-  0x50: "?", 0x51: "get desktop data", 0x52: "set desktop data", 0x60: "protocol version",
+  // Corrected map. The earlier version came from the misaligned
+  // registration-function pairing and labelled everything one entry out.
+  // Confirmed against hardware: 0x21 returns the clock, 0x25 the goal
+  // (2000 on a configured band, 0 on a factory one), 0x31 the 24-hour flag,
+  // and 0x36 reads 0x55 = ASCII 'U' (gender unspecified).
+  0x07: "chunked transfer: NP image", 0x08: "version",
+  0x09: "chunked transfer: main FW image", 0x0a: "network-processor version",
+  0x0b: "network flash", 0x13: "battery", 0x17: "sample query",
+  0x19: "read memory int", 0x1a: "?", 0x1c: "restoreDefaults (DESTRUCTIVE)",
+  0x1f: "sync finished", 0x21: "clock", 0x24: "fuel", 0x25: "goal",
+  0x28: "run-state", 0x31: "24-hour mode", 0x32: "metric units",
+  0x33: "weight", 0x34: "height", 0x35: "age", 0x36: "gender",
+  0x37: "display orientation", 0x38: "display goal options",
+  0x39: "display format", 0x3a: "display loop", 0x3b: "display message options",
+  0x40: "access token", 0x41: "refresh token", 0x42: "timestamp",
+  0x51: "get/set desktop data", 0x52: "set desktop data", 0x60: "protocol version",
   0xbb: "memory read", 0xce: "progress", 0xdf: "status", 0xe0: "model",
   0xe1: "serial", 0xe2: "hw revision", 0xf2: "firmware image",
 };

@@ -129,6 +129,16 @@ against full disassembly of individual handlers.
 | `0x24` | fuel | — (read) |
 | `0x25` | **goal** | `[type:1][goal:3 BE]` |
 | `0x31` | **24-hour mode** | `[bool:1]` |
+| `0x32` | metric units | |
+| `0x33` | weight | 2 bytes |
+| `0x34` | height | 2 bytes |
+| `0x35` | age | |
+| `0x36` | gender | reads `0x55` = ASCII `'U'` (unspecified) on a factory band |
+| `0x37` | display orientation | |
+| `0x38` | display goal options | |
+| `0x39` | display format | |
+| `0x3a` | display loop | reads `00 01 03 05` — four entries |
+| `0x3b` | display message options | |
 | `0x17` | sample query | — |
 | `0x19` | read memory int (sample store) | `[addr:3 BE]` |
 | `0xbb` | memory read | `[region:3][offset:3 BE]` |
@@ -150,7 +160,7 @@ below are from factory-state bands.
 | `0x06` | `06 01` | |
 | `0x0d` | `00 00 00 00 00 00` | |
 | `0x0e` | `00` | |
-| `0x15` | `01 0f a7 0f c3 07 d0 01 a5 09 0b 86` | contains `07 d0` = the goal written to that band — a summary/daily record |
+| `0x15` | `01 0f a7 0f c3 07 d0 01 a5 09 0b 86` (band 1) / `…0f d4 07 d0 02 5e…` (band 2) | **not** the goal — `07 d0` appears on both units, so it is a constant. Differing fields (`0f c3`/`0f d4`, `01 a5`/`02 5e`) look like ADC/sensor readings |
 | `0x1d` | `02 02` | |
 | `0x26` | `00 00 00 01 00 00 00 01` | two BE32 `1`s |
 | `0x27` | `00` | |
