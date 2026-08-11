@@ -825,6 +825,29 @@ const OP = {
   is24Hour: 0x31,    // [bool:1]                                     (do24Hour)
 };
 
+// Send a command through BOTH framings and report which one the band engages
+// with. Identity/status commands answer on the 07-tagged framing (feat#1);
+// region-selected reads answer on the data framing (feat#4). The option
+// commands were only ever tried on the data framing — hence this.
+async function sendBoth(dev, cmd, label) {
+  const out = {};
+  // data framing -> feat#4
+  outWrite(dev, frameData(cmd));
+  await delay(120);
+  const d = tryRead(dev, 4).data || [];
+  out.data = d;
+  await delay(60);
+  // 07-tagged system framing -> feat#1
+  outWrite(dev, frameSys(cmd));
+  await delay(120);
+  const s = tryRead(dev, 1).data || [];
+  out.sys = s;
+  const live = (b) => b.length > 2 ? b.length - 2 : 0;   // payload bytes past [id,len]
+  console.log(`  ${label.padEnd(22)} data[${hex(d) || "-"}]${live(d) > 1 ? " <ENGAGED>" : ""}`);
+  console.log(`  ${"".padEnd(22)} sys [${hex(s) || "-"}]${live(s) > 1 ? " <ENGAGED>" : ""}`);
+  return out;
+}
+
 // Set the clock with the CORRECT opcode.
 async function setClock2(dev) {
   const now = Math.floor(Date.now() / 1000);
@@ -879,25 +902,33 @@ async function setGoal(dev, goal = 2000, type = 0) {
 // Try activating the band the way the pre-blob protocol would have:
 // individual option writes rather than a config blob.
 async function activate(dev) {
-  console.log("\n=== ACTIVATE via individual option commands ===");
+  console.log("\n=== ACTIVATE via individual option commands (both framings) ===");
   const st0 = await imprintedBit(dev);
   console.log(`imprinted before: ${st0.bit}   status ${st0.raw ? hex(st0.raw) : "-"}`);
-  await setClock2(dev);
-  await setGoal(dev, 2000, 0);
-  console.log("\n=== 24-hour mode (0x31, one bool byte) ===");
-  outWrite(dev, frameData([OP.is24Hour]));
-  await delay(120);
-  console.log(`  read : ${hex((tryRead(dev,4).data) || [])}`);
-  outWrite(dev, frameData([OP.is24Hour, 0x01]));
-  await delay(150);
-  console.log(`  write: ${hex((tryRead(dev,4).data) || [])}`);
-  await delay(120);
-  outWrite(dev, frameData([OP.is24Hour]));
-  await delay(120);
-  console.log(`  after: ${hex((tryRead(dev,4).data) || [])}`);
+
+  const now = Math.floor(Date.now() / 1000);
+  const gmt = ((-new Date().getTimezoneOffset()) * 60) >>> 0;
+
+  const steps = [
+    ["time READ",     [OP.time]],
+    ["time WRITE",    [OP.time, ...beU32(now), ...beU32(gmt), 0x00]],
+    ["time READ",     [OP.time]],
+    ["goal READ",     [OP.goal, 0x00]],
+    ["goal WRITE 2000",[OP.goal, 0x00, 0x00, 0x07, 0xd0]],
+    ["goal READ",     [OP.goal, 0x00]],
+    ["24hour READ",   [OP.is24Hour]],
+    ["24hour WRITE 1",[OP.is24Hour, 0x01]],
+    ["24hour READ",   [OP.is24Hour]],
+  ];
+  for (const [label, cmd] of steps) {
+    console.log(`\n${label}  sent: ${hex(cmd)}`);
+    await sendBoth(dev, cmd, label);
+  }
+
   const st1 = await imprintedBit(dev);
   console.log(`\nimprinted after: ${st1.bit}   status ${st1.raw ? hex(st1.raw) : "-"}`);
-  console.log("\nNow UNPLUG the band and press its button — does it show a clock?");
+  console.log("\nLook for <ENGAGED> above, and for a READ value that CHANGED after its WRITE.");
+  console.log("Then UNPLUG the band and press its button — does it show a clock?");
 }
 
 async function imprintedBit(dev) {
