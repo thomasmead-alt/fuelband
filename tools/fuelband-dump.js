@@ -451,21 +451,10 @@ async function writeTest(dev) {
 // Chunked desktop write in the app's structure: each chunk is
 // [0x51, moreFlag, off(3 BE), 0x83, 0xa2, ...data], offset = cumulative data
 // bytes sent (moreFlag = 1 once offset > 0).
-async function chunkedWriteDesktop(dev, blob, dataPerChunk = 48) {
-  let offset = 0;
-  const replies = [];
-  while (offset < blob.length) {
-    const moreFlag = offset > 0 ? 1 : 0;
-    const off3 = [(offset >> 16) & 0xff, (offset >> 8) & 0xff, offset & 0xff];
-    const chunk = blob.slice(offset, offset + dataPerChunk);
-    const cmd = [0x51, moreFlag, ...off3, 0x83, 0xa2, ...chunk];
-    outWrite(dev, frameData(cmd));
-    await delay(80);
-    const r = tryRead(dev, 4);
-    replies.push(r.data ? hex(r.data).slice(0, 14) : "-");
-    offset += chunk.length;
-  }
-  return replies;
+async function chunkedWriteDesktop(dev, blob) {
+  const xfer = new FuelBandTransfer(dev, { verbose: false });
+  const replies = await xfer.send(blob);
+  return replies.map((r) => (r.length ? hex(r).slice(0, 14) : "-"));
 }
 
 // Full imprint via chunked write + read-back verification.
@@ -497,6 +486,106 @@ async function imprint2(dev) {
     if (committed) { console.log("  write landed but didn't imprint — likely need save or a different imprint_state. Big progress."); return; }
   }
   console.log("\nNothing committed. The blob format/CRC is likely being rejected — read-back is our oracle to fix it.");
+}
+
+// ---------------------------------------------------------------------------
+// FuelBandTransfer — byte-for-byte reimplementation of the app's chunked
+// transfer routine at FuelBandPlugin.dll:0x100386f0.
+//
+// Device-side state the DLL maintains (offsets into its device object):
+//   this+0x180  the full payload buffer
+//   this+0x18c  bytes already sent  (the transfer offset — NOT the region)
+//   this+0x190  "transfer complete" flag, set when the last chunk goes out
+//
+// Chunk layout, in the exact append order of the disassembly:
+//   [extra…][flag][off>>16][off>>8][off&0xff][data…]
+// where extra = 0x83 0xa2 for desktop data (doSetDesktopData @0x1003AE10),
+// and the whole chunk is sent as the body of opcode 0x51.
+//
+//   flag = 0  first chunk (offset == 0)
+//        = 1  continuation
+//        = 2  final chunk — but only rewritten to 2 if it was already non-zero,
+//             so a single-chunk transfer keeps flag 0.
+//
+// Data budget per chunk: 0x3c - chunkHeaderLen - 1 = 60 - 6 - 1 = 53 bytes.
+//
+// NOTE: earlier attempts sent [83 a2][3 offset bytes] — one byte short. The
+// header carries a flag byte AND a 3-byte offset (4 bytes after the marker).
+// ---------------------------------------------------------------------------
+class FuelBandTransfer {
+  constructor(dev, { opcode = 0x51, extra = [0x83, 0xa2], verbose = true } = {}) {
+    this.dev = dev;
+    this.opcode = opcode;
+    this.extra = extra;
+    this.verbose = verbose;
+    this.offset = 0;
+    this.done = false;
+    this.replies = [];
+  }
+
+  buildChunk(buffer) {
+    const chunk = [...this.extra];
+    const flagIndex = chunk.length;
+    chunk.push(this.offset !== 0 ? 1 : 0);
+    chunk.push((this.offset >> 16) & 0xff, (this.offset >> 8) & 0xff, this.offset & 0xff);
+
+    const space = 0x3c - chunk.length - 1;         // 53
+    const remaining = buffer.length - this.offset;
+    let take = space;
+    if (remaining <= space) {
+      take = remaining;
+      if (chunk[flagIndex] !== 0) chunk[flagIndex] = 2;  // final-chunk marker
+      this.done = true;
+    }
+    chunk.push(...buffer.slice(this.offset, this.offset + take));
+    this.offset += take;
+    return chunk;
+  }
+
+  async send(buffer) {
+    this.offset = 0;
+    this.done = false;
+    this.replies = [];
+    while (this.offset < buffer.length) {
+      const chunk = this.buildChunk(buffer);
+      const cmd = [this.opcode, ...chunk];
+      outWrite(this.dev, frameData(cmd));
+      await delay(80);
+      const r = tryRead(this.dev, 4);
+      const reply = r.data || [];
+      this.replies.push(reply);
+      if (this.verbose) {
+        console.log(`  chunk @${this.offset - (chunk.length - 6)} flag=${chunk[this.extra.length]} ` +
+                    `(${chunk.length - 6}B data)`);
+        console.log(`    sent:  ${hex(cmd).slice(0, 80)}${cmd.length > 27 ? " …" : ""}`);
+        console.log(`    reply: ${r.error ? "ERR " + r.error : hex(reply).slice(0, 60)}`);
+      }
+    }
+    return this.replies;
+  }
+}
+
+// Send an arbitrary payload through the corrected transfer, then read back.
+async function xferTest(dev, payload) {
+  console.log("\n=== TRANSFER TEST (corrected chunk header) ===");
+  console.log(`payload: ${hex(payload)} (${payload.length}B)`);
+  const before = await readDesktop(dev, 0);
+  console.log(`before @0: ${hex(Array.prototype.slice.call(before, 7, 7 + 16))}`);
+
+  const xfer = new FuelBandTransfer(dev);
+  await xfer.send(payload);
+
+  await delay(200);
+  const after = await readDesktop(dev, 0);
+  const data = Array.prototype.slice.call(after, 7, 7 + payload.length);
+  console.log(`after  @0: ${hex(Array.prototype.slice.call(after, 7, 7 + 16))}`);
+
+  const exact = hex(data) === hex(payload);
+  const partial = data.some((b, i) => b === payload[i] && b !== 0xff);
+  if (exact) console.log("\n*** WRITE COMMITTED — payload read back exactly. ***");
+  else if (partial) console.log("\n*** REGION CHANGED (partial match) — write is landing. ***");
+  else console.log("\nRegion unchanged. Reply bytes above show how the band parsed it.");
+  return exact || partial;
 }
 
 async function imprintedBit(dev) {
@@ -807,6 +896,12 @@ async function dumpMemory(dev, maxBytes = 320) {
     } else if (process.argv.includes("--imprint2")) {
       await identity(dev);
       await imprint2(dev);
+    } else if (process.argv.includes("--xfer")) {
+      const ai = process.argv.indexOf("--xfer");
+      const rest = process.argv.slice(ai + 1).filter((a) => /^[0-9a-fA-F]{1,2}$/.test(a));
+      const payload = rest.length ? rest.map((h) => parseInt(h, 16)) : [0xaa, 0xbb, 0xcc, 0xdd];
+      await identity(dev);
+      await xferTest(dev, payload);
     } else if (process.argv.includes("--fuzzwrite")) {
       await identity(dev);
       await fuzzWriteOpcodes(dev);
