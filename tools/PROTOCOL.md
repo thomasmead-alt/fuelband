@@ -282,6 +282,32 @@ the transaction around it, and the absence of any finalize step are all now
 established facts, and the band still refuses. What remains is not "which packet
 did we miss" but "what does this firmware implement".
 
+> **Caveat on the wording.** "Region `0x83a2xx`" and "prefix `83 a2` plus a flag"
+> are the *same bytes on the wire* and cannot be distinguished by any external
+> test. Do not record this as "the firmware lacks region `0x83a2xx`" — the
+> falsifiable claim is that **the band does not act on `51 83 a2 …`**. Anyone
+> inspecting a firmware dump should look for the handler that consumes that
+> sequence, not for a region table entry.
+
+### Loose end: `0x51` replies are length-dependent
+
+The handler's reply varies with command length in a way we have not mapped, and
+one observation was not reproducible across sessions:
+
+| sent | reply |
+|---|---|
+| `51` (alone) | `01 01 51` |
+| `51 de ad be ef` (op + 5) | `01 02 51 01` |
+| `51 0d de ad be ef` (op + 5, different lead) | `01 07 51 00 00 00 00 00 00` |
+| `51 83 a2 00 00 00 00` (op + 6, unknown region) | `01 01 51` |
+| `51 50 37 36 00 00 00` (op + 6, known region) | `01 3d 51 01 00 00 38 …` |
+
+An earlier fuzz run got `01 02 51 01` / `01 07 51 …` from short `0x51` forms; a
+later run returned `01 01 51` for comparable inputs. That is the only hint of
+session-dependent state we have seen, and it is worth re-checking during a USB
+capture — it may indicate the handler behaves differently once the device has
+been put into some mode we never established.
+
 ---
 
 ## 6. Root cause of the imprint problem
