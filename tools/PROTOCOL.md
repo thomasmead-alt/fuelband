@@ -304,7 +304,7 @@ then the region can be probed directly in the read form:
 
 **Conclusion.** This band does not act on the write form the 2015 Nike+ Connect
 DLL emits, under any construction we can produce, and stages nothing. Whether
-that is because region `0x83a2xx` does not exist in firmware `F 12.2`
+that is because region `0x83a2xx` does not exist in firmware `F2.12`
 (`46 0c 02 61 4f 58 3d`), or because `83 a2` is a prefix requiring device state
 we cannot establish, is **not distinguishable from outside** — both produce the
 identical bare echo.
@@ -371,7 +371,7 @@ the firmware or a capture of a real session.
 ## 8. Remaining paths
 
 Both remaining routes answer the same, now precisely-stated question: **does
-firmware `F 12.2` implement region `0x83a2xx`, and what gates it?**
+firmware `F2.12` implement region `0x83a2xx`, and what gates it?**
 
 1. **USB capture of Nike+ Connect** (Wireshark + USBPcap on Windows) — shows
    what the real app sends *to this band*, including anything earlier in the
