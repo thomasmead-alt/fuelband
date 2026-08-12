@@ -1231,6 +1231,59 @@ async function imprintedBit(dev) {
   return { raw: s, bit: s && s.length ? (s[0] & 1) : null };
 }
 
+// Test the one untested cell: imprint_state == 2 (SETUP COMPLETE) WITH a
+// populated DIN. fuzzActivation phase 1 tried state=2 but with an empty DIN;
+// phase 2 populated the DIN but only with state 1 / 0xffffffff. Neither tried
+// both together. The DLL's imprint-state enum is Fresh(0) / ImprintingReady(1)
+// / SETUP COMPLETE(2), and the whole imprint web-flow exists to set the DIN and
+// flip state to SETUP COMPLETE — so state=2 + a non-empty DIN is the closest a
+// fabricated blob can get to what a provisioned band actually carries.
+//
+// Uses ONLY the verified chunked desktop-data write (0x51) plus the status read
+// (0xdf) — no new or guessed opcodes. If this flips the bit, save() is moot; if
+// not, the next step is to derive save()'s real opcode before persisting.
+async function imprint3(dev) {
+  console.log("\n=== IMPRINT v3 — state=2 (SETUP COMPLETE) + populated DIN ===");
+  const base = await imprintedBit(dev);
+  console.log(`baseline: imprinted=${base.bit}  status=${base.raw ? hex(base.raw) : "-"}`);
+
+  const readHead = async () => {
+    const r = await readDesktop(dev, 0);
+    return hex(Array.prototype.slice.call(r, 7, 7 + 24));
+  };
+  console.log(`region head before: ${await readHead()}`);
+
+  const uuid = "12345678-1234-1234-1234-123456789abc";
+  const cases = [
+    [{ imprintState: 2, din: uuid },                              "state=2, DIN only"],
+    [{ imprintState: 2, din: uuid, udi: uuid },                   "state=2, DIN+UDI"],
+    [{ imprintState: 2, din: uuid, udi: uuid, groupId: uuid },    "state=2, DIN+UDI+group"],
+    [{ imprintState: 2, din: uuid, udi: uuid, groupId: "1" },     "state=2, all three (group='1')"],
+  ];
+
+  for (const [opts, label] of cases) {
+    const blob = buildBlob(opts);
+    console.log(`\n-- ${label}  (blob ${blob.length}B) --`);
+    const x = new FuelBandTransfer(dev, { verbose: false });
+    try { await x.send(blob); }
+    catch (e) { console.log(`  write failed: ${e.message}`); continue; }
+    await delay(200);
+    const head = await readHead();
+    const committed = head.replace(/ /g, "").slice(0, 6) !== "ffffff";
+    console.log(`  region head after : ${head}  ${committed ? "(committed)" : "(still FF)"}`);
+    const after = await imprintedBit(dev);
+    console.log(`  status=${after.raw ? hex(after.raw) : "-"}  imprinted=${after.bit}`);
+    if (after.bit === 1) {
+      console.log(`\n  *** IMPRINTED — ${label} ***  (blob contents alone satisfied the firmware)`);
+      return true;
+    }
+  }
+  console.log("\nNo cell set the imprinted bit. If region committed but bit stayed 0,");
+  console.log("the next lever is an explicit save() to flash — I'll derive its opcode first.");
+  console.log("\nUnplug the band and press the button regardless — report what it shows.");
+  return false;
+}
+
 // Brute-force imprint: sweep candidate imprint_state values, writing the config
 // blob and checking whether the readable imprinted bit flips.
 async function imprint(dev) {
@@ -1531,6 +1584,9 @@ async function dumpMemory(dev, maxBytes = 320) {
       const length = parseInt(process.argv[ai + 2] || "400", 16);
       await identity(dev);
       await readMem(dev, start, length);
+    } else if (process.argv.includes("--imprint3")) {
+      await identity(dev);
+      await imprint3(dev);
     } else if (process.argv.includes("--imprint2")) {
       await identity(dev);
       await imprint2(dev);
