@@ -1231,6 +1231,33 @@ async function imprintedBit(dev) {
   return { raw: s, bit: s && s.length ? (s[0] & 1) : null };
 }
 
+// Decode status byte 0 as the provisioning checklist. Bit map extracted from
+// the DLL's completeStatus (FuelBandCommands.cc): the AND masks in order are
+// 0x01 imprinted, 0x06>>1 mode, 0x08 goalSet, 0x10 powerDay, 0x20 airplaneMode,
+// 0x80 serialSet. Bit 0x40 is set by our writes but not decoded by Nike's tool.
+async function checklist(dev) {
+  console.log("\n=== STATUS CHECKLIST (byte 0 decoded per completeStatus) ===");
+  const s = await readSystem(dev, [0xdf]);
+  if (!s || !s.length) { console.log("no status"); return; }
+  const b = s[0];
+  const bin = b.toString(2).padStart(8, "0");
+  console.log(`raw status: ${hex(s)}   byte0=0x${b.toString(16)} (${bin})`);
+  const rows = [
+    ["imprinted", b & 0x01],
+    ["mode", (b & 0x06) >> 1],
+    ["goalSet", (b & 0x08) >> 3],
+    ["powerDay", (b & 0x10) >> 4],
+    ["airplaneMode", (b & 0x20) >> 5],
+    ["bit6 (undecoded)", (b & 0x40) >> 6],
+    ["serialSet", (b & 0x80) >> 7],
+  ];
+  for (const [name, v] of rows) {
+    const mark = name === "imprinted" ? (v ? "  <<< IMPRINTED!" : "  <-- still 0") : "";
+    console.log(`  ${name.padEnd(18)} = ${v}${mark}`);
+  }
+  return b;
+}
+
 // Test the one untested cell: imprint_state == 2 (SETUP COMPLETE) WITH a
 // populated DIN. fuzzActivation phase 1 tried state=2 but with an empty DIN;
 // phase 2 populated the DIN but only with state 1 / 0xffffffff. Neither tried
@@ -1584,6 +1611,9 @@ async function dumpMemory(dev, maxBytes = 320) {
       const length = parseInt(process.argv[ai + 2] || "400", 16);
       await identity(dev);
       await readMem(dev, start, length);
+    } else if (process.argv.includes("--checklist")) {
+      await identity(dev);
+      await checklist(dev);
     } else if (process.argv.includes("--imprint3")) {
       await identity(dev);
       await imprint3(dev);
