@@ -1231,6 +1231,47 @@ async function imprintedBit(dev) {
   return { raw: s, bit: s && s.length ? (s[0] & 1) : null };
 }
 
+// Read the SYSTEM-RESERVED region (doReadSystemReserved, opcode 0xce).
+// Derived from the Mac plugin (fuelbandplugin.dylib, i386): the method does
+// submit(0xce, [N]) where N is the byte count to read, reply on the feature
+// reports. This region is distinct from the desktop-data blob — a candidate
+// home for the canonical imprint flag / DIN. Read-only (no write method exists),
+// but seeing what a band actually holds here is the point.
+async function readSysReserved(dev, n = 0x40) {
+  console.log(`\n=== READ SYSTEM-RESERVED (0xce, ${n} bytes) ===`);
+  const cmd = [0xce, n & 0xff];
+  console.log(`sent: ${hex(cmd)} (07-wrapped)`);
+  outWrite(dev, frameSys(cmd));
+  await delay(120);
+  for (const rid of [1, 2, 3, 4]) {
+    const r = tryRead(dev, rid);
+    if (!r.error && r.data && r.data.length > 2) {
+      console.log(`  feat#${rid}: ${hex(r.data)}`);
+    }
+  }
+  console.log("(look for non-ff bytes — that's whatever the firmware keeps reserved)");
+}
+
+// Reboot the band over USB (doReset). From the Mac plugin's sendReset(bool):
+// UsbExchangeThread::send(0x01, [0x81, 0xb4], true) — opcode 0x01 with a fixed
+// two-byte magic that guards against accidental resets. This is the ROUTINE
+// reboot the desktop app used; it is NOT restoreDefaults (0x02, wipes config),
+// latchup (0x03, battery off) or bootblock (0x04). The magic + hardcoded bytes
+// below make it impossible to fat-finger an adjacent opcode.
+//
+// After it fires the band reboots and USB drops — reads will error, that's
+// expected. Replug and run --checklist to read imprinted on the fresh boot.
+const RESET_MAGIC = [0x01, 0x81, 0xb4]; // opcode 0x01 + guard bytes, do not alter
+async function sendDeviceReset(dev) {
+  console.log("\n=== DEVICE RESET / REBOOT (doReset — 0x01 + magic 81 b4) ===");
+  console.log(`sending exactly: ${hex(RESET_MAGIC)} (07-wrapped)`);
+  console.log("this is the reboot, NOT restoreDefaults(02)/latchup(03)/bootblock(04).");
+  outWrite(dev, frameSys(RESET_MAGIC));
+  await delay(150);
+  console.log("sent. The band should reboot now — USB will drop.");
+  console.log("Wait ~15s for it to re-enumerate, then run:  node fuelband-dump.js --checklist");
+}
+
 // Decode status byte 0 as the provisioning checklist. Bit map extracted from
 // the DLL's completeStatus (FuelBandCommands.cc): the AND masks in order are
 // 0x01 imprinted, 0x06>>1 mode, 0x08 goalSet, 0x10 powerDay, 0x20 airplaneMode,
@@ -1611,6 +1652,14 @@ async function dumpMemory(dev, maxBytes = 320) {
       const length = parseInt(process.argv[ai + 2] || "400", 16);
       await identity(dev);
       await readMem(dev, start, length);
+    } else if (process.argv.includes("--sysreserved")) {
+      const si = process.argv.indexOf("--sysreserved");
+      const n = parseInt(process.argv[si + 1] || "40", 16);
+      await identity(dev);
+      await readSysReserved(dev, n);
+    } else if (process.argv.includes("--reset")) {
+      await identity(dev);
+      await sendDeviceReset(dev);
     } else if (process.argv.includes("--checklist")) {
       await identity(dev);
       await checklist(dev);
