@@ -1282,6 +1282,39 @@ async function provision(dev) {
   console.log("  (wait ~15s)   node fuelband-dump.js --checklist");
 }
 
+// Real getDesktopData (doGetDesktopData, opcode 0x50) — the FIRMWARE's own view
+// of its desktop data, not a raw region read. From the Mac plugin: the request
+// is submit(0x50, ['7','6', off:3]) i.e. wire bytes [0x50,0x37,0x36,off:3] — note
+// 0x50 IS the 'P' of "P76", so the payload is just "76"+offset. completeGet-
+// DesktopData logs "Uninitialized length, assuming new device" when the length
+// field comes back unset. This is the test that separates "firmware rejected our
+// blob's format" (comes back uninitialized) from "firmware parsed it fine but
+// won't imprint a fabricated DIN" (comes back as our blob).
+async function getDesktopData(dev, offset = 0) {
+  console.log(`\n=== getDesktopData (0x50, firmware's parsed view) off=${offset} ===`);
+  const o = [(offset >> 16) & 0xff, (offset >> 8) & 0xff, offset & 0xff];
+  const cmd = [0x50, 0x37, 0x36, ...o];
+  console.log(`sent: ${hex(cmd)} (07-wrapped)`);
+  outWrite(dev, frameSys(cmd));
+  await delay(150);
+  let got = false;
+  for (const rid of [4, 3, 2, 1]) {
+    const r = tryRead(dev, rid);
+    if (!r.error && r.data && r.data.length > 3) {
+      const body = Array.prototype.slice.call(r.data, 3); // strip [id,len,07]
+      console.log(`  feat#${rid}: ${hex(r.data)}`);
+      // first 4 bytes of body = BE length header per the parser
+      if (body.length >= 4) {
+        const len = ((body[0] << 24) | (body[1] << 16) | (body[2] << 8) | body[3]) >>> 0;
+        const uninit = len === 0xffffffff || len === 0;
+        console.log(`    length header = 0x${len.toString(16)}  ${uninit ? "<<< UNINITIALIZED (firmware sees NO valid desktop data)" : "(firmware reports a desktop-data length)"}`);
+      }
+      got = true;
+    }
+  }
+  if (!got) console.log("  (no reply — 0x50 not answered on these reports)");
+}
+
 // Read the SYSTEM-RESERVED region (doReadSystemReserved, opcode 0xce).
 // Derived from the Mac plugin (fuelbandplugin.dylib, i386): the method does
 // submit(0xce, [N]) where N is the byte count to read, reply on the feature
@@ -1703,6 +1736,11 @@ async function dumpMemory(dev, maxBytes = 320) {
       const length = parseInt(process.argv[ai + 2] || "400", 16);
       await identity(dev);
       await readMem(dev, start, length);
+    } else if (process.argv.includes("--getdesktop")) {
+      const gi = process.argv.indexOf("--getdesktop");
+      const off = parseInt(process.argv[gi + 1] || "0", 16);
+      await identity(dev);
+      await getDesktopData(dev, off);
     } else if (process.argv.includes("--provision")) {
       await identity(dev);
       await provision(dev);
