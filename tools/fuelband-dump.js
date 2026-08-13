@@ -1166,7 +1166,9 @@ function buildBlob({ imprintState = 1, din = null, udi = null, groupId = null, e
 // unknown-items passthrough (empty for a fresh record).
 const field48 = (v) => {
   const out = new Array(48).fill(0);
-  if (v) for (let i = 0; i < Math.min(v.length, 48); i++) out[i] = v.charCodeAt(i);
+  if (v == null) return out;
+  if (Array.isArray(v)) { for (let i = 0; i < Math.min(v.length, 48); i++) out[i] = v[i] & 0xff; return out; }
+  for (let i = 0; i < Math.min(v.length, 48); i++) out[i] = v.charCodeAt(i);
   return out;
 };
 const tlvUint = (tag, v) => [(tag >> 8) & 0xff, tag & 0xff, 0x04,
@@ -1261,6 +1263,36 @@ async function minimize(dev) {
     if (r.imprinted) { console.log(`\n  *** imprinted WITHOUT 0x${drop.toString(16)} ***`); return; }
   }
   console.log("\nNo single-drop variant imprinted. The container/identity is the gate, not one TLV.");
+}
+
+// Identity sweep on the full canonical record — bounded to meaningful candidates
+// (NOT brute force). Top candidate: the all-0xFF legacy DIN (Nike's own no-DIN
+// fallback; evilsocket found all-FF works for BLE auth). Also tests whether the
+// firmware wants tokens PRESENT vs VALID.
+async function idFuzz(dev) {
+  console.log("\n=== IDENTITY SWEEP (full canonical record, meaningful identities) ===");
+  const uuid = "12345678-1234-1234-1234-123456789abc";
+  const ff16 = new Array(16).fill(0xff);
+  const ff48 = new Array(48).fill(0xff);
+  const serial = "20M9FC5V01660";
+  const tok = "0000000000000000000000000000000000000000";
+  const cases = [
+    ["DIN=16xFF legacy",     { din: ff16, udi: ff16, group: ff16 }],
+    ["DIN=48xFF",            { din: ff48, udi: ff48, group: ff48 }],
+    ["DIN=FF uuid-string",   { din: "ffffffff-ffff-ffff-ffff-ffffffffffff", udi: "ffffffff-ffff-ffff-ffff-ffffffffffff", group: "1" }],
+    ["DIN=serial",           { din: serial, udi: serial, group: "1" }],
+    ["tokens populated",     { din: uuid, udi: uuid, group: "1", t05: tok, t06: tok, t07: tok, t0c: "user", t0f: "name" }],
+    ["all populated + FF DIN",{ din: ff16, udi: ff16, group: ff16, t05: tok, t06: tok, t07: tok, t0c: "user", t0f: "name" }],
+    ["empty identity",       { din: "", udi: "", group: "" }],
+  ];
+  for (const [label, opts] of cases) {
+    const blob = buildCanonicalBlob({ imprintState: 1, ...opts });
+    const r = await writeAndVerify(dev, blob, label);
+    if (r.imprinted) { console.log(`\n  *** IMPRINTED — ${label} ***`); return; }
+  }
+  console.log("\nNo identity variant imprinted immediately. If the all-FF cases");
+  console.log("look promising, reboot-verify: --canonical --reset uses the fake UUID;");
+  console.log("the decisive proof is now a DIN read from a provisioned band.");
 }
 
 async function statusBytes(dev) {
@@ -1855,6 +1887,9 @@ async function dumpMemory(dev, maxBytes = 320) {
     } else if (process.argv.includes("--minimize")) {
       await identity(dev);
       await minimize(dev);
+    } else if (process.argv.includes("--idfuzz")) {
+      await identity(dev);
+      await idFuzz(dev);
     } else if (process.argv.includes("--getdesktop")) {
       const gi = process.argv.indexOf("--getdesktop");
       const off = parseInt(process.argv[gi + 1] || "0", 16);
