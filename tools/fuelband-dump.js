@@ -1231,6 +1231,57 @@ async function imprintedBit(dev) {
   return { raw: s, bit: s && s.length ? (s[0] & 1) : null };
 }
 
+// Full provisioning pass — write the whole athlete profile + settings + all
+// four timestamps, the way the desktop app's Update-thread does at imprint.
+// Every opcode here was extracted and calibrated from the SYMBOLIZED Mac plugin
+// (fuelbandplugin.dylib): time=0x21, goal=0x25, metric=0x32, weight=0x33,
+// height=0x34, age=0x35, gender=0x36, timestamp=0x42[id], 24-hour=0x31.
+// Timestamp ids: 1=device-init, 2=assessment-start, 3=fuel-reset, 4=goal-reset.
+// All sent 07-wrapped (the framing submit() uses). Hypothesis: the firmware sets
+// imprinted only once a COMPLETE provisioning state exists (esp. device-init,
+// which a factory band leaves unset — the DLL branches on "uninitialized
+// device"). After this, reboot with --reset and re-read --checklist.
+async function provision(dev) {
+  console.log("\n=== FULL PROVISION (all setters, verified opcodes, 07-wrapped) ===");
+  const now = Math.floor(Date.now() / 1000);
+  const gmt = ((-new Date().getTimezoneOffset()) * 60) >>> 0;
+  const goal = 2000;
+
+  const steps = [
+    ["time",            [0x21, ...beU32(now), ...beU32(gmt), 0x00], [0x21]],
+    ["ts device-init",  [0x42, 0x01, ...beU32(now)],                [0x42, 0x01]],
+    ["ts assess-start", [0x42, 0x02, ...beU32(now)],                [0x42, 0x02]],
+    ["ts fuel-reset",   [0x42, 0x03, ...beU32(now)],                [0x42, 0x03]],
+    ["ts goal-reset",   [0x42, 0x04, ...beU32(now)],                [0x42, 0x04]],
+    ["goal 2000",       [0x25, 0x00, (goal>>16)&0xff, (goal>>8)&0xff, goal&0xff], [0x25, 0x00]],
+    ["metric",          [0x32, 0x00],       [0x32]],
+    ["age 30",          [0x35, 0x1e],       [0x35]],
+    ["gender M",        [0x36, 0x4d],       [0x36]],
+    ["24-hour",         [0x31, 0x01],       [0x31]],
+  ];
+
+  for (const [label, wr, rd] of steps) {
+    outWrite(dev, frameSys(rd)); await delay(90);
+    const before = tryRead(dev, 1).data || [];
+    outWrite(dev, frameSys(wr)); await delay(140);
+    const wrReply = tryRead(dev, 1).data || [];
+    await delay(90);
+    outWrite(dev, frameSys(rd)); await delay(90);
+    const after = tryRead(dev, 1).data || [];
+    const changed = hex(before) !== hex(after);
+    const engaged = wrReply.length > 3; // more than [01,len,07] => body echoed
+    console.log(`  ${label.padEnd(16)} wr:${hex(wr)}`);
+    console.log(`  ${"".padEnd(16)} reply:${hex(wrReply)||"-"}  before:${hex(before)||"-"}  after:${hex(after)||"-"}` +
+                `${changed ? "  *CHANGED*" : ""}${engaged ? "" : ""}`);
+  }
+
+  console.log("\n--- checklist after provisioning (pre-reboot) ---");
+  await checklist(dev);
+  console.log("\nNow reboot to let the firmware re-evaluate with a FULL profile in flash:");
+  console.log("  node fuelband-dump.js --reset");
+  console.log("  (wait ~15s)   node fuelband-dump.js --checklist");
+}
+
 // Read the SYSTEM-RESERVED region (doReadSystemReserved, opcode 0xce).
 // Derived from the Mac plugin (fuelbandplugin.dylib, i386): the method does
 // submit(0xce, [N]) where N is the byte count to read, reply on the feature
@@ -1652,6 +1703,9 @@ async function dumpMemory(dev, maxBytes = 320) {
       const length = parseInt(process.argv[ai + 2] || "400", 16);
       await identity(dev);
       await readMem(dev, start, length);
+    } else if (process.argv.includes("--provision")) {
+      await identity(dev);
+      await provision(dev);
     } else if (process.argv.includes("--sysreserved")) {
       const si = process.argv.indexOf("--sysreserved");
       const n = parseInt(process.argv[si + 1] || "40", 16);
