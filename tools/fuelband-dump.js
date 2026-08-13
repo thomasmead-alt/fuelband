@@ -1150,6 +1150,119 @@ function buildBlob({ imprintState = 1, din = null, udi = null, groupId = null, e
           ...payload, (crc >> 8) & 0xff, crc & 0xff];
 }
 
+// ---- Canonical DesktopOptions record ------------------------------------
+// Reconstructed byte-exactly from the Mac plugin's DesktopOptions::as_vector,
+// with wire formats verified against storeKey/storeUint/storeInt64/storeString
+// and the getString parser:
+//   container : [len:4 BE][DIN:48][UDI:48][group:48][TLVs...][CRC-CCITT:2]
+//   fixed str : 48 bytes, right-padded with 0x00 (no length prefix)
+//   uint  TLV : [tag:2 BE][0x04][u32 BE]
+//   int64 TLV : [tag:2 BE][0x08][u64 BE]
+//   string TLV: [tag:2 BE][bytes...][0x00]   (NUL-terminated, per getString)
+//   serializer emits TLVs in this order: 01 02 0b 05 06 07 0c 0f 0d 0e
+// Tags whose semantics are inferred (athlete.1.* field set): 0x0b=imprint_state,
+// 0x0d=profileUpdateDate(int64). 0x05/06/07/0c/0f are the string fields
+// (tokens / screenName / userName). 0x01/0x02 are small uints. 0x0e is the
+// unknown-items passthrough (empty for a fresh record).
+const field48 = (v) => {
+  const out = new Array(48).fill(0);
+  if (v) for (let i = 0; i < Math.min(v.length, 48); i++) out[i] = v.charCodeAt(i);
+  return out;
+};
+const tlvUint = (tag, v) => [(tag >> 8) & 0xff, tag & 0xff, 0x04,
+  (v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff];
+const tlvInt64 = (tag, v) => { // v as JS number -> 8 bytes BE
+  const b = [];
+  let n = BigInt(v);
+  for (let i = 7; i >= 0; i--) b[i] = Number(n & 0xffn), n >>= 8n;
+  return [(tag >> 8) & 0xff, tag & 0xff, 0x08, ...b];
+};
+const tlvStr = (tag, s) => [(tag >> 8) & 0xff, tag & 0xff,
+  ...Array.from(s || "", (c) => c.charCodeAt(0)), 0x00];
+
+function buildCanonicalBlob(opts = {}) {
+  const o = {
+    din: "", udi: "", group: "",
+    t01: 0, t02: 0, imprintState: 1,
+    t05: "", t06: "", t07: "", t0c: "", t0f: "",
+    profileUpdate: Math.floor(Date.now() / 1000),
+    include: null,   // null = all TLVs; else a Set of tags to include
+    ...opts,
+  };
+  const want = (tag) => o.include === null || o.include.has(tag);
+  const payload = [...field48(o.din), ...field48(o.udi), ...field48(o.group)];
+  if (want(0x01)) payload.push(...tlvUint(0x01, o.t01));
+  if (want(0x02)) payload.push(...tlvUint(0x02, o.t02));
+  if (want(0x0b)) payload.push(...tlvUint(0x0b, o.imprintState));
+  if (want(0x05)) payload.push(...tlvStr(0x05, o.t05));
+  if (want(0x06)) payload.push(...tlvStr(0x06, o.t06));
+  if (want(0x07)) payload.push(...tlvStr(0x07, o.t07));
+  if (want(0x0c)) payload.push(...tlvStr(0x0c, o.t0c));
+  if (want(0x0f)) payload.push(...tlvStr(0x0f, o.t0f));
+  if (want(0x0d)) payload.push(...tlvInt64(0x0d, o.profileUpdate));
+  // 0x0e (unknown-items passthrough) intentionally empty for a fresh record
+  const total = payload.length + 6;
+  const crc = crc16xmodem(payload);
+  return [(total >>> 24) & 0xff, (total >>> 16) & 0xff, (total >>> 8) & 0xff, total & 0xff,
+          ...payload, (crc >> 8) & 0xff, crc & 0xff];
+}
+
+// Write a blob, verify the firmware parsed it (getDesktopData length header),
+// and report the imprinted bit. The verification is the key guard against a
+// "container looks plausible but parser rejects it" iteration.
+async function writeAndVerify(dev, blob, label) {
+  const before = await imprintedBit(dev);
+  const x = new FuelBandTransfer(dev, { verbose: false });
+  try { await x.send(blob); }
+  catch (e) { console.log(`  ${label}: write FAILED ${e.message}`); return { ok: false }; }
+  await delay(200);
+  // read firmware's parsed view
+  outWrite(dev, frameSys([0x50, 0x37, 0x36, 0, 0, 0]));
+  await delay(150);
+  let hdr = null, gd = [];
+  for (const rid of [4, 3, 2, 1]) {
+    const r = tryRead(dev, rid);
+    if (!r.error && r.data && r.data.length > 8) { gd = Array.prototype.slice.call(r.data, 3); break; }
+  }
+  if (gd.length >= 8) hdr = ((gd[4] << 24) | (gd[5] << 16) | (gd[6] << 8) | gd[7]) >>> 0;
+  const after = await imprintedBit(dev);
+  console.log(`  ${label.padEnd(24)} blob=${blob.length}B  gd-len=${hdr !== null ? "0x" + hdr.toString(16) : "?"}  imprinted ${before.bit}->${after.bit}` +
+              (after.bit === 1 ? "   *** IMPRINTED! ***" : ""));
+  return { ok: true, imprinted: after.bit === 1, hdr };
+}
+
+async function canonical(dev, doReset) {
+  console.log("\n=== CANONICAL DESKTOPOPTIONS (full 10-TLV record) ===");
+  const uuid = "12345678-1234-1234-1234-123456789abc";
+  const blob = buildCanonicalBlob({ din: uuid, udi: uuid, group: "1", imprintState: 1 });
+  console.log(`blob head: ${hex(blob.slice(0, 16))} ... (${blob.length}B)`);
+  const r = await writeAndVerify(dev, blob, "canonical full");
+  if (doReset && !r.imprinted) {
+    console.log("\nrebooting to force re-evaluation...");
+    await sendDeviceReset(dev);
+  }
+  console.log("\nIf gd-len matches the blob size, the firmware parsed our record.");
+  console.log("If imprinted flipped to 1 — activation solved. If not, run --minimize.");
+}
+
+// Controlled field-elimination: start from the full record, drop one TLV at a
+// time, writing+verifying each. This is a systematic reduction, NOT random
+// fuzzing — it tells us which fields matter once (if) the full record works.
+async function minimize(dev) {
+  console.log("\n=== FIELD-ELIMINATION (drop one TLV at a time) ===");
+  const uuid = "12345678-1234-1234-1234-123456789abc";
+  const all = [0x01, 0x02, 0x0b, 0x05, 0x06, 0x07, 0x0c, 0x0f, 0x0d];
+  const base = { din: uuid, udi: uuid, group: "1", imprintState: 1 };
+  await writeAndVerify(dev, buildCanonicalBlob({ ...base, include: new Set(all) }), "FULL (all TLVs)");
+  for (const drop of all) {
+    const set = new Set(all.filter((t) => t !== drop));
+    const r = await writeAndVerify(dev, buildCanonicalBlob({ ...base, include: set }),
+      `drop 0x${drop.toString(16).padStart(2, "0")}`);
+    if (r.imprinted) { console.log(`\n  *** imprinted WITHOUT 0x${drop.toString(16)} ***`); return; }
+  }
+  console.log("\nNo single-drop variant imprinted. The container/identity is the gate, not one TLV.");
+}
+
 async function statusBytes(dev) {
   outWrite(dev, frameSys([0xdf]));
   await delay(90);
@@ -1736,6 +1849,12 @@ async function dumpMemory(dev, maxBytes = 320) {
       const length = parseInt(process.argv[ai + 2] || "400", 16);
       await identity(dev);
       await readMem(dev, start, length);
+    } else if (process.argv.includes("--canonical")) {
+      await identity(dev);
+      await canonical(dev, process.argv.includes("--reset"));
+    } else if (process.argv.includes("--minimize")) {
+      await identity(dev);
+      await minimize(dev);
     } else if (process.argv.includes("--getdesktop")) {
       const gi = process.argv.indexOf("--getdesktop");
       const off = parseInt(process.argv[gi + 1] || "0", 16);
