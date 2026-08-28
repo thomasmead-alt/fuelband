@@ -28,14 +28,18 @@ const DIR = __dirname;
 const LOG = path.join(DIR, "mitm-log.txt");
 
 // ---- The identity we hand the band. Change freely; note it to diff later. ----
-const uuid = () => crypto.randomUUID();
+// DIN/UDI are 14-digit NUMERIC strings and serial is 16-digit (this is the shape
+// tiferrei/fuelband's working server used and Nike+ Connect accepted — NOT UUIDs).
+const n14 = () => String(Math.floor(Math.random() * 9e13) + 1e13);
 const IDENTITY = {
-  din: uuid(),
-  udi: uuid(),
-  deviceGroupConfigId: uuid(),
+  din: n14(),
+  udi: n14(),
+  userDeviceId: n14(),
+  deviceGroupConfigId: crypto.randomUUID(),
   upmId: String(Math.floor(Math.random() * 1e9)),
   accessToken: crypto.randomBytes(20).toString("hex"),
   refreshToken: crypto.randomBytes(20).toString("hex"),
+  onetimetoken: crypto.randomBytes(12).toString("hex"),
 };
 console.log("Minting identity for this session:");
 console.log(JSON.stringify(IDENTITY, null, 2));
@@ -46,52 +50,72 @@ function log(line) {
 }
 
 // Heuristic responder. Returns [statusCode, jsonObject|string].
+// Endpoint shapes reconstructed from tiferrei/fuelband's working server
+// (API/server.py) — the imprint chain Nike+ Connect actually calls:
+//   POST /v1.0/device/imprint  GET /v1.0/device/onetimetoken
+//   GET  /plus/setup/<ott>     GET/POST /events/connect/<din>[/ack/<id>]
+//   GET  /map/getAccessToken   GET /v1.0/me/profile   GET/PUT /v1.0/me/device/<din>
+//   GET  /v1.0/me/sync/lasttimestamp
+// deviceType is FUELBAND (gen-1), NOT FUELBAND2 (the SE, which tiferrei hardcoded).
 function respond(method, url, headers, body) {
   const u = url.toLowerCase();
   const b = (body || "").toLowerCase();
 
-  // OAuth token exchange
-  if (u.includes("token") || b.includes("grant_type")) {
+  // Device imprint -> issue identity. This is the pivotal call.
+  if (u.includes("/device/imprint") || u.includes("imprint")) {
     return [200, {
-      access_token: IDENTITY.accessToken,
-      refresh_token: IDENTITY.refreshToken,
-      token_type: "bearer",
-      expires_in: 3600,
-      scope: "nikeplus",
-    }];
-  }
-  // Device registration / DIN acquisition
-  if (u.includes("register") || u.includes("acquire") || u.includes("/device") ||
-      u.includes("din") || u.includes("imprint")) {
-    return [200, {
+      userDeviceId: IDENTITY.userDeviceId,
       din: IDENTITY.din,
       udi: IDENTITY.udi,
+      deviceName: "Nike+ FuelBand",
+      deviceString: "FUELBAND",
+      deviceType: "FUELBAND",
+      serialNo: "20M9FC5V01660",
       deviceGroupConfigId: IDENTITY.deviceGroupConfigId,
-      upmId: IDENTITY.upmId,
-      serialNumber: "20M9FC5V01660",
+      color: 0, firmwareVersion: "F2.12", softwareVersion: "F2.12", carrier: "",
       success: true,
     }];
   }
-  // Event polling -> hand back the setup_complete event once
-  if (u.includes("event")) {
+  // One-time token + setup trigger
+  if (u.includes("onetimetoken")) return [200, { onetimetoken: IDENTITY.onetimetoken }];
+  if (u.includes("/plus/setup/")) return [200, { status: "ok" }];
+
+  // OAuth access token
+  if (u.includes("getaccesstoken") || u.includes("token") || b.includes("grant_type")) {
     return [200, {
-      events: [{ eventType: "setup_complete", udi: IDENTITY.udi }],
-      eventType: "setup_complete",
+      access_token: IDENTITY.accessToken, refresh_token: IDENTITY.refreshToken,
+      token_type: "bearer", expires_in: 3600, scope: "nikeplus",
     }];
   }
-  // Device preferences
-  if (u.includes("preference") || u.includes("profile") || u.includes("cpc")) {
-    return [200, {
-      accessToken: IDENTITY.accessToken,
-      upmId: IDENTITY.upmId,
-      goal: 2000, gender: "M", height: 180, weight: 80,
-    }];
+  // Event queue -> hand back setup_complete (carries dailyGoal + band_name)
+  if (u.includes("/events/connect/") || u.includes("event")) {
+    if (method === "POST") return [200, { status: "ok" }]; // ack
+    return [200, [{
+      eventId: "1", eventType: "setup_complete",
+      din: IDENTITY.din, dailyGoal: 2000, band_name: "FUEL",
+    }]];
   }
-  // PIN
+  // Profile / device / settings
+  if (u.includes("/me/profile")) {
+    return [200, { deviceList: [{ deviceString: "FUELBAND", deviceType: "FUELBAND", din: IDENTITY.din }],
+                   upmId: IDENTITY.upmId, screenName: "user", firstName: "Fuel" }];
+  }
+  if (u.includes("/me/device/")) {
+    return [200, { din: IDENTITY.din, udi: IDENTITY.udi, deviceType: "FUELBAND",
+                   deviceGroupConfigId: IDENTITY.deviceGroupConfigId, dailyGoal: 2000 }];
+  }
+  if (u.includes("lasttimestamp")) {
+    return [200, { upmid: IDENTITY.upmId, plusid: IDENTITY.upmId, lastSyncOffset: 0, lastSyncTimeStamp: 0 }];
+  }
+  if (u.includes("preference") || u.includes("cpc")) {
+    return [200, { accessToken: IDENTITY.accessToken, upmId: IDENTITY.upmId,
+                   goal: 2000, gender: "M", height: 180, weight: 80 }];
+  }
+  if (u.includes("challenge")) return [200, method === "POST" ? { status: "ok" } : []];
   if (u.includes("pin")) return [200, { pin: "1234" }];
 
-  // Default: 200 + empty object so the app keeps moving; log it so we can add a
-  // precise handler next iteration.
+  // Default: 200 + empty object so the app keeps moving; the log shows any
+  // gen-1-only endpoint we then add a precise handler for.
   return [200, {}];
 }
 

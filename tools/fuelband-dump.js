@@ -1235,8 +1235,10 @@ async function writeAndVerify(dev, blob, label) {
 
 async function canonical(dev, doReset) {
   console.log("\n=== CANONICAL DESKTOPOPTIONS (full 10-TLV record) ===");
-  const uuid = "12345678-1234-1234-1234-123456789abc";
-  const blob = buildCanonicalBlob({ din: uuid, udi: uuid, group: "1", imprintState: 1 });
+  // DIN/UDI are 14-digit NUMERIC strings (per tiferrei's working fake server:
+  // Nike+ Connect accepts din="42424242424242"), NOT UUIDs as we assumed.
+  const din = "42424242424242", udi = "42424242424243";
+  const blob = buildCanonicalBlob({ din, udi, group: "1", imprintState: 1 });
   console.log(`blob head: ${hex(blob.slice(0, 16))} ... (${blob.length}B)`);
   const r = await writeAndVerify(dev, blob, "canonical full");
   if (doReset && !r.imprinted) {
@@ -1277,6 +1279,8 @@ async function idFuzz(dev) {
   const serial = "20M9FC5V01660";
   const tok = "0000000000000000000000000000000000000000";
   const cases = [
+    ["DIN=14-digit numeric",  { din: "42424242424242", udi: "42424242424243", group: "1" }],
+    ["numeric + imprint=2",   { din: "42424242424242", udi: "42424242424243", group: "1", imprintState: 2 }],
     ["DIN=16xFF legacy",     { din: ff16, udi: ff16, group: ff16 }],
     ["DIN=48xFF",            { din: ff48, udi: ff48, group: ff48 }],
     ["DIN=FF uuid-string",   { din: "ffffffff-ffff-ffff-ffff-ffffffffffff", udi: "ffffffff-ffff-ffff-ffff-ffffffffffff", group: "1" }],
@@ -1458,6 +1462,46 @@ async function getDesktopData(dev, offset = 0) {
     }
   }
   if (!got) console.log("  (no reply — 0x50 not answered on these reports)");
+}
+
+// Access-token (0x40) / refresh-token (0x41) read+write. From the Mac plugin:
+// doAccessToken issues submit(0x40, [0xf3,0x3d,0xff,0x26, ...tokenBytes, 0x00]);
+// completeAccessToken parses a token FROM the reply, so 0x40 is also a read.
+// These were NEVER sent in prior work. The imprinted bit is firmware-set and the
+// DDB doesn't trip it; the token write is the one remaining on-wire lever and the
+// gen-1 analog of the SE's all-FF acceptance test. Low risk (named command).
+async function tokenTest(dev, opcode = 0x40, token = null) {
+  const name = opcode === 0x40 ? "access-token" : "refresh-token";
+  console.log(`\n=== ${name.toUpperCase()} (0x${opcode.toString(16)}) read + write test ===`);
+  const before = await imprintedBit(dev);
+  console.log(`imprinted before: ${before.bit}  status ${before.raw ? hex(before.raw) : "-"}`);
+
+  // READ current token (empty-payload form)
+  outWrite(dev, frameSys([opcode]));
+  await delay(120);
+  const rd = tryRead(dev, 1).data || [];
+  console.log(`read reply : ${hex(rd) || "-"}`);
+
+  // WRITE: mirror the app framing exactly — [f3 3d ff 26][token bytes][00]
+  const tok = token == null ? "42424242424242" : token; // numeric DIN-style default
+  const body = [opcode, 0xf3, 0x3d, 0xff, 0x26,
+    ...Array.from(tok, (c) => c.charCodeAt(0)), 0x00];
+  console.log(`write cmd  : ${hex(body)}`);
+  outWrite(dev, frameSys(body));
+  await delay(160);
+  const wr = tryRead(dev, 1).data || [];
+  console.log(`write reply: ${hex(wr) || "-"}`);
+
+  await delay(120);
+  outWrite(dev, frameSys([opcode]));
+  await delay(120);
+  const rb = tryRead(dev, 1).data || [];
+  console.log(`read back  : ${hex(rb) || "-"}  ${hex(rd) !== hex(rb) ? "*CHANGED*" : "unchanged"}`);
+
+  const after = await imprintedBit(dev);
+  console.log(`imprinted after : ${after.bit}  status ${after.raw ? hex(after.raw) : "-"}` +
+    (after.bit === 1 ? "   *** IMPRINTED! ***" : ""));
+  return after.bit === 1;
 }
 
 // Read the SYSTEM-RESERVED region (doReadSystemReserved, opcode 0xce).
@@ -1881,6 +1925,12 @@ async function dumpMemory(dev, maxBytes = 320) {
       const length = parseInt(process.argv[ai + 2] || "400", 16);
       await identity(dev);
       await readMem(dev, start, length);
+    } else if (process.argv.includes("--token")) {
+      const ti = process.argv.indexOf("--token");
+      const which = process.argv[ti + 1];
+      await identity(dev);
+      if (which === "refresh") await tokenTest(dev, 0x41);
+      else await tokenTest(dev, 0x40);
     } else if (process.argv.includes("--canonical")) {
       await identity(dev);
       await canonical(dev, process.argv.includes("--reset"));
