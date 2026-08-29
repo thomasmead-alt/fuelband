@@ -1233,6 +1233,62 @@ async function writeAndVerify(dev, blob, label) {
   return { ok: true, imprinted: after.bit === 1, hdr };
 }
 
+// The complete imprint sequence, in the desktop app's Update-thread ORDER, with
+// every USB-side step we can now issue — tokens included. Prior tests only ever
+// exercised pieces in isolation; the firmware may only set imprinted after the
+// full ordered chain. Order (from FuelbandWebManager + "At setTime (end of
+// Update-thread)"): access token -> refresh token -> full DDB (numeric DIN,
+// tokens embedded, imprint_state) -> profile -> CLOCK LAST -> status.
+async function fullImprint(dev, doReset) {
+  console.log("\n=== FULL IMPRINT SEQUENCE (ordered, with tokens) ===");
+  const base = await imprintedBit(dev);
+  console.log(`imprinted before: ${base.bit}  status ${base.raw ? hex(base.raw) : "-"}`);
+
+  const din = "42424242424242", udi = "42424242424243";
+  const accessTok = "cxVRol18AvkbCNI9nbiLMyi1PN9I";          // shape from a real SE dump
+  const refreshTok = "cufLQUAOCLhUdAr6oEMmbGKvmyRp6sOU";
+  const tokWrite = (op, tok) => {
+    const body = [op, 0xf3, 0x3d, 0xff, 0x26, ...Array.from(tok, (c) => c.charCodeAt(0)), 0x00];
+    outWrite(dev, frameSys(body));
+    return delay(150).then(() => console.log(`  0x${op.toString(16)} token: reply ${hex(tryRead(dev, 1).data || []) || "-"}`));
+  };
+
+  // 1-2. tokens
+  await tokWrite(0x40, accessTok);
+  await tokWrite(0x41, refreshTok);
+
+  // 3. full DDB with tokens embedded (0x05/06/07) + SETUP-COMPLETE-ish state
+  for (const state of [2, 1]) {
+    const blob = buildCanonicalBlob({ din, udi, group: "1", imprintState: state,
+      t05: accessTok, t06: refreshTok, t07: udi, t0c: "user", t0f: "Fuel" });
+    const x = new FuelBandTransfer(dev, { verbose: false });
+    try { await x.send(blob); console.log(`  DDB imprint_state=${state}: written (${blob.length}B)`); }
+    catch (e) { console.log(`  DDB write failed: ${e.message}`); }
+    await delay(150);
+  }
+
+  // 4. profile (metric/age/gender/goal)
+  for (const cmd of [[0x32, 0x00], [0x35, 0x1e], [0x36, 0x4d], [0x25, 0x00, 0x00, 0x07, 0xd0]]) {
+    outWrite(dev, frameSys(cmd)); await delay(110);
+  }
+  console.log("  profile (metric/age/gender/goal): sent");
+
+  // 5. CLOCK LAST — the documented final step of the Update-thread
+  const now = Math.floor(Date.now() / 1000);
+  const gmt = ((-new Date().getTimezoneOffset()) * 60) >>> 0;
+  outWrite(dev, frameSys([0x21, ...beU32(now), ...beU32(gmt), 0x00]));
+  await delay(150);
+  console.log("  clock: set (final step)");
+
+  const after = await imprintedBit(dev);
+  console.log(`\nimprinted after : ${after.bit}  status ${after.raw ? hex(after.raw) : "-"}` +
+    (after.bit === 1 ? "   *** IMPRINTED! ***" : ""));
+  if (doReset && after.bit !== 1) { console.log("\nrebooting to force re-evaluation..."); await sendDeviceReset(dev); }
+  console.log("\nIf still 0: reboot (--reset) then --checklist. The clock-last order matches");
+  console.log("the DLL; if this doesn't flip it, the firmware wants a server-signed token.");
+  return after.bit === 1;
+}
+
 async function canonical(dev, doReset) {
   console.log("\n=== CANONICAL DESKTOPOPTIONS (full 10-TLV record) ===");
   // DIN/UDI are 14-digit NUMERIC strings (per tiferrei's working fake server:
@@ -1925,6 +1981,9 @@ async function dumpMemory(dev, maxBytes = 320) {
       const length = parseInt(process.argv[ai + 2] || "400", 16);
       await identity(dev);
       await readMem(dev, start, length);
+    } else if (process.argv.includes("--fullimprint")) {
+      await identity(dev);
+      await fullImprint(dev, process.argv.includes("--reset"));
     } else if (process.argv.includes("--token")) {
       const ti = process.argv.indexOf("--token");
       const which = process.argv[ti + 1];
