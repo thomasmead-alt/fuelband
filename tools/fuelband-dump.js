@@ -1245,8 +1245,10 @@ async function fullImprint(dev, doReset) {
   console.log(`imprinted before: ${base.bit}  status ${base.raw ? hex(base.raw) : "-"}`);
 
   const din = "42424242424242", udi = "42424242424243";
-  const accessTok = "cxVRol18AvkbCNI9nbiLMyi1PN9I";          // shape from a real SE dump
-  const refreshTok = "cufLQUAOCLhUdAr6oEMmbGKvmyRp6sOU";
+  // Neutral placeholder tokens (NOT the SE's — the original's OAuth token format
+  // is unknown; these just exercise the gen-1 0x40/0x41 writers non-empty).
+  const accessTok = "0000000000000000000000000000";
+  const refreshTok = "00000000000000000000000000000000";
   const tokWrite = (op, tok) => {
     const body = [op, 0xf3, 0x3d, 0xff, 0x26, ...Array.from(tok, (c) => c.charCodeAt(0)), 0x00];
     outWrite(dev, frameSys(body));
@@ -1257,8 +1259,10 @@ async function fullImprint(dev, doReset) {
   await tokWrite(0x40, accessTok);
   await tokWrite(0x41, refreshTok);
 
-  // 3. full DDB with tokens embedded (0x05/06/07) + SETUP-COMPLETE-ish state
-  for (const state of [2, 1]) {
+  // 3. full DDB with tokens embedded (0x05/06/07) + imprint_state candidates.
+  // gen-1 imprint_state is a u32 (%08X in the plugin); FRESH=0, SETUP COMPLETE=
+  // some nonzero. We don't know the exact value, so sweep plausible originals.
+  for (const state of [2, 1, 3, 0x14]) {
     const blob = buildCanonicalBlob({ din, udi, group: "1", imprintState: state,
       t05: accessTok, t06: refreshTok, t07: udi, t0c: "user", t0f: "Fuel" });
     const x = new FuelBandTransfer(dev, { verbose: false });
@@ -1287,6 +1291,37 @@ async function fullImprint(dev, doReset) {
   console.log("\nIf still 0: reboot (--reset) then --checklist. The clock-last order matches");
   console.log("the DLL; if this doesn't flip it, the firmware wants a server-signed token.");
   return after.bit === 1;
+}
+
+// Reboot the band, wait for USB re-enumeration, and reopen it — so we can verify
+// imprinted across a REAL power cycle inside one command (the gen-1 firmware may
+// only re-evaluate at boot). Returns a fresh device handle or null.
+async function resetAndReopen(dev) {
+  await sendDeviceReset(dev);
+  try { dev.close(); } catch {}
+  console.log("waiting ~20s for reboot + re-enumeration...");
+  await delay(20000);
+  for (let i = 0; i < 12; i++) {
+    try { const nd = openDevice(); console.log("band re-enumerated, reopened."); return nd; }
+    catch { await delay(3000); }
+  }
+  console.log("could not reopen band after reboot — run --checklist manually once it's back.");
+  return null;
+}
+
+// Full ordered imprint, then power-cycle, then re-read imprinted — all in one go.
+// gen-1 (original) path only: DDB (0x50/0x51) + imprint_state + gen-1 tokens.
+async function autoImprint(dev) {
+  console.log("\n=== AUTO IMPRINT (ordered write -> power cycle -> recheck) ===");
+  await fullImprint(dev, false);
+  const nd = await resetAndReopen(dev);
+  if (!nd) return;
+  await identity(nd);
+  const b = await checklist(nd);
+  console.log(b !== undefined && (b & 1) ? "\n*** IMPRINTED ACROSS REBOOT ***"
+    : "\nStill 0 after a real power cycle. On the original, that points to a" +
+      "\nserver-signed token requirement — real Nike+ Connect + fake server is next.");
+  try { nd.close(); } catch {}
 }
 
 async function canonical(dev, doReset) {
@@ -1981,6 +2016,9 @@ async function dumpMemory(dev, maxBytes = 320) {
       const length = parseInt(process.argv[ai + 2] || "400", 16);
       await identity(dev);
       await readMem(dev, start, length);
+    } else if (process.argv.includes("--autoimprint")) {
+      await identity(dev);
+      await autoImprint(dev);
     } else if (process.argv.includes("--fullimprint")) {
       await identity(dev);
       await fullImprint(dev, process.argv.includes("--reset"));
