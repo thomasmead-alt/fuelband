@@ -1185,7 +1185,7 @@ const tlvStr = (tag, s) => [(tag >> 8) & 0xff, tag & 0xff,
 function buildCanonicalBlob(opts = {}) {
   const o = {
     din: "", udi: "", group: "",
-    t01: 0, t02: 0, imprintState: 1,
+    t01: 0, t02: 0, imprintState: 100,
     t05: "", t06: "", t07: "", t0c: "", t0f: "",
     profileUpdate: Math.floor(Date.now() / 1000),
     include: null,   // null = all TLVs; else a Set of tags to include
@@ -1259,22 +1259,28 @@ async function fullImprint(dev, doReset) {
   await tokWrite(0x40, accessTok);
   await tokWrite(0x41, refreshTok);
 
-  // 2b. RUN-STATE — saveDesktopAttributes calls saveRunState() BEFORE building
-  // and writing the DDB (disasm 0x148a5, between the option batch and
-  // as_vector). We had never included it in the imprint batch. Payload form
-  // from doRunState: [0x28, f1, 29, state] (+4B BE offset when state&1).
-  for (const st of [0x00, 0x01]) {
-    const rs = (st & 1) ? [0x28, 0xf1, 0x29, st, 0x00, 0x01, 0x51, 0x80]
-                        : [0x28, 0xf1, 0x29, st];
-    outWrite(dev, frameSys(rs));
+  // 2b. RUN-STATE — saveRunState() runs BEFORE the DDB write. Critically, the
+  // plugin DERIVES run-state from imprint_state, which is a PERCENTAGE-scale
+  // value (0-100), not a small enum:
+  //     imprint_state == 100 (0x64) -> run-state = 0x12
+  //     imprint_state <   20 (0x14) -> no change at all  (our old 1/2/3 hit this!)
+  //     otherwise (20..99)          -> run-state = 0x02
+  // 0x02 and 0x12 are even, so no 4-byte offset tail (that's only when state&1).
+  // saveRunState then emits timestamp-assessment-start (42 02) if state&0x02,
+  // and timestamp-device-init (42 01) if state&0x10.
+  for (const st of [0x02, 0x12]) {
+    outWrite(dev, frameSys([0x28, 0xf1, 0x29, st]));
     await delay(150);
-    console.log(`  run-state ${st}: reply ${hex(tryRead(dev, 1).data || []) || "-"}`);
+    console.log(`  run-state 0x${st.toString(16)}: reply ${hex(tryRead(dev, 1).data || []) || "-"}`);
+    if (st & 0x02) { outWrite(dev, frameSys([0x42, 0x02])); await delay(120);
+      console.log(`    ts assessment-start (42 02): ${hex(tryRead(dev, 1).data || []) || "-"}`); }
+    if (st & 0x10) { outWrite(dev, frameSys([0x42, 0x01])); await delay(120);
+      console.log(`    ts device-init (42 01): ${hex(tryRead(dev, 1).data || []) || "-"}`); }
   }
 
-  // 3. full DDB with tokens embedded (0x05/06/07) + imprint_state candidates.
-  // gen-1 imprint_state is a u32 (%08X in the plugin); FRESH=0, SETUP COMPLETE=
-  // some nonzero. We don't know the exact value, so sweep plausible originals.
-  for (const state of [2, 1, 3, 0x14]) {
+  // 3. full DDB with tokens embedded (0x05/06/07) + imprint_state.
+  // 100 (0x64) is the COMPLETE value per the run-state derivation above.
+  for (const state of [100, 99, 0x14]) {
     const blob = buildCanonicalBlob({ din, udi, group: "1", imprintState: state,
       t05: accessTok, t06: refreshTok, t07: udi, t0c: "user", t0f: "Fuel" });
     const x = new FuelBandTransfer(dev, { verbose: false });
@@ -1283,13 +1289,19 @@ async function fullImprint(dev, doReset) {
     await delay(150);
   }
 
-  // 4. profile (metric/age/gender/goal)
-  for (const cmd of [[0x32, 0x00], [0x35, 0x1e], [0x36, 0x4d], [0x25, 0x00, 0x00, 0x07, 0xd0]]) {
-    outWrite(dev, frameSys(cmd)); await delay(110);
-  }
-  console.log("  profile (metric/age/gender/goal): sent");
+  // 4. option-age — the ONE option command that is actually part of
+  // saveDesktopAttributes (sent only when age derives non-zero from the dob).
+  outWrite(dev, frameSys([0x35, 0x1e])); await delay(120);
+  console.log(`  option-age (35 1e): ${hex(tryRead(dev, 1).data || []) || "-"}`);
 
-  // 5. CLOCK LAST — the documented final step of the Update-thread
+  // 5. Closing readback — the plugin's save batch ends with getDesktopData
+  // (wire 50 37 36 00 00 00). No 'save'/commit opcode exists.
+  outWrite(dev, frameSys([0x50, 0x37, 0x36, 0x00, 0x00, 0x00]));
+  await delay(150);
+  console.log(`  readback (50 37 36 ...): ${hex(tryRead(dev, 4).data || tryRead(dev, 1).data || []) || "-"}`);
+
+  // 6. Clock (separate saveTimeAttributes path, but harmless and matches the
+  // Update-thread's documented "At setTime (end of Update-thread)").
   const now = Math.floor(Date.now() / 1000);
   const gmt = ((-new Date().getTimezoneOffset()) * 60) >>> 0;
   outWrite(dev, frameSys([0x21, ...beU32(now), ...beU32(gmt), 0x00]));
@@ -1341,7 +1353,7 @@ async function canonical(dev, doReset) {
   // DIN/UDI are 14-digit NUMERIC strings (per tiferrei's working fake server:
   // Nike+ Connect accepts din="42424242424242"), NOT UUIDs as we assumed.
   const din = "42424242424242", udi = "42424242424243";
-  const blob = buildCanonicalBlob({ din, udi, group: "1", imprintState: 1 });
+  const blob = buildCanonicalBlob({ din, udi, group: "1", imprintState: 100 });
   console.log(`blob head: ${hex(blob.slice(0, 16))} ... (${blob.length}B)`);
   const r = await writeAndVerify(dev, blob, "canonical full");
   if (doReset && !r.imprinted) {
@@ -1359,7 +1371,7 @@ async function minimize(dev) {
   console.log("\n=== FIELD-ELIMINATION (drop one TLV at a time) ===");
   const uuid = "12345678-1234-1234-1234-123456789abc";
   const all = [0x01, 0x02, 0x0b, 0x05, 0x06, 0x07, 0x0c, 0x0f, 0x0d];
-  const base = { din: uuid, udi: uuid, group: "1", imprintState: 1 };
+  const base = { din: uuid, udi: uuid, group: "1", imprintState: 100 };
   await writeAndVerify(dev, buildCanonicalBlob({ ...base, include: new Set(all) }), "FULL (all TLVs)");
   for (const drop of all) {
     const set = new Set(all.filter((t) => t !== drop));
@@ -1383,7 +1395,8 @@ async function idFuzz(dev) {
   const tok = "0000000000000000000000000000000000000000";
   const cases = [
     ["DIN=14-digit numeric",  { din: "42424242424242", udi: "42424242424243", group: "1" }],
-    ["numeric + imprint=2",   { din: "42424242424242", udi: "42424242424243", group: "1", imprintState: 2 }],
+    ["numeric + imprint=100", { din: "42424242424242", udi: "42424242424243", group: "1", imprintState: 100 }],
+    ["numeric + imprint=99",  { din: "42424242424242", udi: "42424242424243", group: "1", imprintState: 99 }],
     ["DIN=16xFF legacy",     { din: ff16, udi: ff16, group: ff16 }],
     ["DIN=48xFF",            { din: ff48, udi: ff48, group: ff48 }],
     ["DIN=FF uuid-string",   { din: "ffffffff-ffff-ffff-ffff-ffffffffffff", udi: "ffffffff-ffff-ffff-ffff-ffffffffffff", group: "1" }],
@@ -1393,7 +1406,7 @@ async function idFuzz(dev) {
     ["empty identity",       { din: "", udi: "", group: "" }],
   ];
   for (const [label, opts] of cases) {
-    const blob = buildCanonicalBlob({ imprintState: 1, ...opts });
+    const blob = buildCanonicalBlob({ imprintState: 100, ...opts });
     const r = await writeAndVerify(dev, blob, label);
     if (r.imprinted) { console.log(`\n  *** IMPRINTED — ${label} ***`); return; }
   }
