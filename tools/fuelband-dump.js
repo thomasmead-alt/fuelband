@@ -1751,19 +1751,59 @@ async function memBanks(dev, from = 0, to = 15) {
 // reports. This region is distinct from the desktop-data blob — a candidate
 // home for the canonical imprint flag / DIN. Read-only (no write method exists),
 // but seeing what a band actually holds here is the point.
-async function readSysReserved(dev, n = 0x40) {
-  console.log(`\n=== READ SYSTEM-RESERVED (0xce, ${n} bytes) ===`);
-  const cmd = [0xce, n & 0xff];
-  console.log(`sent: ${hex(cmd)} (07-wrapped)`);
-  outWrite(dev, frameSys(cmd));
-  await delay(120);
-  for (const rid of [1, 2, 3, 4]) {
-    const r = tryRead(dev, rid);
-    if (!r.error && r.data && r.data.length > 2) {
-      console.log(`  feat#${rid}: ${hex(r.data)}`);
+// doReadSystemReserved takes a FIELD INDEX (0-15), not a byte count. Our earlier
+// call sent 0x40 = field 64, which is out of range — so no valid field had ever
+// actually been read. Known fields: 0=BAND_COLOR, 1=USB_SERIAL_ENUMERATION_METHOD,
+// 2=version (firmware decodes this one). Fields 3-15 are raw reserved bytes the
+// plugin logs as "interpretation not yet implemented" — the plausible home of
+// factory/provisioning state. All read-only.
+const SYSRES_FIELDS = {
+  0: "BAND_COLOR", 1: "USB_SERIAL_ENUMERATION_METHOD", 2: "version",
+};
+async function readSysReserved(dev, from = 0, to = 15) {
+  console.log("\n=== SYSTEM-RESERVED FIELD SWEEP (0xce, fields 0-15) — read-only ===");
+  console.log("field | name                          | reply");
+  for (let f = from; f <= to; f++) {
+    outWrite(dev, frameSys([0xce, f & 0xff]));
+    await delay(140);
+    let best = null;
+    for (const rid of [1, 2, 3, 4]) {
+      const r = tryRead(dev, rid);
+      if (!r.error && r.data && r.data.length > 3) {
+        const b = Array.prototype.slice.call(r.data, 0);
+        if (!best || b.length > best.length) best = b;
+      }
     }
+    const name = (SYSRES_FIELDS[f] || "(reserved)").padEnd(29);
+    if (!best) { console.log(`  0x${f.toString(16).padStart(2, "0")} | ${name} | - (unsupported/empty)`); continue; }
+    const body = best.slice(3);
+    const live = body.some((x) => x !== 0x00 && x !== 0xff);
+    console.log(`  0x${f.toString(16).padStart(2, "0")} | ${name} | ${hex(best.slice(0, 24))}${live ? "  <DATA>" : ""}`);
+    await delay(70);
   }
-  console.log("(look for non-ff bytes — that's whatever the firmware keeps reserved)");
+  console.log("\nAn empty reply means the firmware doesn't support that field.");
+  console.log("<DATA> fields hold real content — those are the ones to decode.");
+}
+
+// Two more read-only getters that exist in the binary but not in Nike's XML
+// command spec, and which we have never sent: assessment-metrics (0x17) and the
+// internal fault log (0x06).
+async function extraReads(dev) {
+  console.log("\n=== UNEXERCISED READ-ONLY GETTERS ===");
+  for (const [label, cmd] of [["assessment-metrics", [0x17]], ["fault-log", [0x06]]]) {
+    outWrite(dev, frameSys(cmd));
+    await delay(160);
+    let best = null;
+    for (const rid of [1, 2, 3, 4]) {
+      const r = tryRead(dev, rid);
+      if (!r.error && r.data && r.data.length > 3) {
+        const b = Array.prototype.slice.call(r.data, 0);
+        if (!best || b.length > best.length) best = b;
+      }
+    }
+    console.log(`  ${label.padEnd(20)} ${hex(cmd)} -> ${best ? hex(best.slice(0, 32)) : "- (empty)"}`);
+    await delay(90);
+  }
 }
 
 // Reboot the band over USB (doReset). From the Mac plugin's sendReset(bool):
@@ -2206,9 +2246,13 @@ async function dumpMemory(dev, maxBytes = 320) {
       await provision(dev);
     } else if (process.argv.includes("--sysreserved")) {
       const si = process.argv.indexOf("--sysreserved");
-      const n = parseInt(process.argv[si + 1] || "40", 16);
+      const a = parseInt(process.argv[si + 1] ?? "0", 16);
+      const b = parseInt(process.argv[si + 2] ?? "f", 16);
       await identity(dev);
-      await readSysReserved(dev, n);
+      await readSysReserved(dev, isNaN(a) ? 0 : a, isNaN(b) ? 15 : b);
+    } else if (process.argv.includes("--extrareads")) {
+      await identity(dev);
+      await extraReads(dev);
     } else if (process.argv.includes("--reset")) {
       await identity(dev);
       await sendDeviceReset(dev);
