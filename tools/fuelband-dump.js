@@ -1259,6 +1259,18 @@ async function fullImprint(dev, doReset) {
   await tokWrite(0x40, accessTok);
   await tokWrite(0x41, refreshTok);
 
+  // 2b. RUN-STATE — saveDesktopAttributes calls saveRunState() BEFORE building
+  // and writing the DDB (disasm 0x148a5, between the option batch and
+  // as_vector). We had never included it in the imprint batch. Payload form
+  // from doRunState: [0x28, f1, 29, state] (+4B BE offset when state&1).
+  for (const st of [0x00, 0x01]) {
+    const rs = (st & 1) ? [0x28, 0xf1, 0x29, st, 0x00, 0x01, 0x51, 0x80]
+                        : [0x28, 0xf1, 0x29, st];
+    outWrite(dev, frameSys(rs));
+    await delay(150);
+    console.log(`  run-state ${st}: reply ${hex(tryRead(dev, 1).data || []) || "-"}`);
+  }
+
   // 3. full DDB with tokens embedded (0x05/06/07) + imprint_state candidates.
   // gen-1 imprint_state is a u32 (%08X in the plugin); FRESH=0, SETUP COMPLETE=
   // some nonzero. We don't know the exact value, so sweep plausible originals.
