@@ -22,8 +22,10 @@ subjectAltName=DNS:secure-nikeplus.nike.com,DNS:nikeplus.nike.com,DNS:www.nikepl
 EOF
 
 # 4. Sign
+# Leaf lifetime MUST be <= 825 days or Safari/Security.framework rejects it for
+# the browser setup leg (the app itself does not verify certs at all).
 openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
-  -out server.crt -days 3650 -sha256 -extfile san.ext
+  -out server.crt -days 397 -sha256 -extfile san.ext
 
 rm -f server.csr san.ext ca.srl
 echo

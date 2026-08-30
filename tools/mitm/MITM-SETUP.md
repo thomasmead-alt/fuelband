@@ -37,15 +37,32 @@ sh gen-certs.sh
 ```
 Produces `ca.crt`, `server.key`, `server.crt`.
 
-### 2. Trust the CA
+### 2. Trust the CA — only needed for the BROWSER leg
+**The app itself does no certificate checking at all.** Disassembly of
+`HttpRequest.cc` shows it calls `curl_easy_setopt` with
+`CURLOPT_SSL_VERIFYPEER = 0` and `CURLOPT_SSL_VERIFYHOST = 0`, and ships no CA
+bundle. So any self-signed cert works for the API traffic.
+
+Trust is required only for the setup page, which opens in the system browser:
 ```sh
 sudo security add-trusted-cert -d -r trustRoot \
   -k /Library/Keychains/System.keychain ca.crt
 ```
-(or Keychain Access → System → drag in `ca.crt` → Get Info → Trust → Always).
+(`gen-certs.sh` issues the leaf for 397 days — Safari rejects leaf certs with
+lifetimes over 825 days.)
 
 ### 3. Redirect Nike's hosts to your machine
-Append to `/etc/hosts`:
+Only `secure-nikeplus.nike.com` appears in cleartext in the binary; the rest of
+the service URLs live in an obfuscated embedded resource. So **wildcard the
+whole zone** rather than guessing hostnames. With dnsmasq:
+```
+address=/nike.com/127.0.0.1
+address=/nikeplus.com/127.0.0.1
+```
+then point macOS DNS at `127.0.0.1` (System Preferences → Network → DNS).
+
+`/etc/hosts` works too but cannot wildcard, so start with these and add any host
+the log shows going missing:
 ```
 127.0.0.1  secure-nikeplus.nike.com
 127.0.0.1  nikeplus.nike.com
@@ -53,6 +70,10 @@ Append to `/etc/hosts`:
 127.0.0.1  api.nike.com
 ```
 Flush DNS: `sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder`.
+
+**Alternative that catches everything:** the client honours the system proxy
+(`HttpSettings-osx.cc` / `ProxyResolver.dylib`), so setting a system-wide
+HTTP/HTTPS proxy to the mock catches every host regardless of DNS.
 
 ### 4. Start the mock server
 ```sh
