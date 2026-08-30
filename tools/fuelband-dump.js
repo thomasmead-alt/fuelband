@@ -1160,17 +1160,31 @@ function buildBlob({ imprintState = 1, din = null, udi = null, groupId = null, e
 //   int64 TLV : [tag:2 BE][0x08][u64 BE]
 //   string TLV: [tag:2 BE][bytes...][0x00]   (NUL-terminated, per getString)
 //   serializer emits TLVs in this order: 01 02 0b 05 06 07 0c 0f 0d 0e
-// Tags whose semantics are inferred (athlete.1.* field set): 0x0b=imprint_state,
-// 0x0d=profileUpdateDate(int64). 0x05/06/07/0c/0f are the string fields
-// (tokens / screenName / userName). 0x01/0x02 are small uints. 0x0e is the
-// unknown-items passthrough (empty for a fresh record).
+// AUTHORITATIVE tag table, from DesktopOptions::init's jump table (0x23188)
+// and as_vector. Wire form is [tag u16 BE][len u8][value]; advance = len + 3.
+//   0x01 metric weight       bool, len MUST be 1   (member +0x01)
+//   0x02 metric height       bool, len MUST be 1   (+0x00)
+//   0x05 email               string, len = byte count, NO NUL   (+0x34)
+//   0x06 birthdate           string                (+0x40)
+//   0x07 screen name         string                (+0x4c)
+//   0x0b imprint_state       u32 BE, len MUST be 4 (+0x04)
+//   0x0c first name          string                (+0x58)
+//   0x0d profile_update_date i64 BE, len MUST be 8 (+0x08)
+//   0x0e clock auto set      bool, len 1, DEFAULT 1 (+0x70)  <-- NOT passthrough
+//   0x0f band name           string                (+0x64)
+// Passthrough (unknown) tags are 0x00,0x03,0x04,0x08,0x09,0x0a; a fresh record
+// has none. Emission order: 01 02 0b 05 06 07 0c 0f 0d 0e (0f really precedes 0d).
+// A known tag with the wrong length is silently SKIPPED by the parser.
 const field48 = (v) => {
   const out = new Array(48).fill(0);
   if (v == null) return out;
-  if (Array.isArray(v)) { for (let i = 0; i < Math.min(v.length, 48); i++) out[i] = v[i] & 0xff; return out; }
-  for (let i = 0; i < Math.min(v.length, 48); i++) out[i] = v.charCodeAt(i);
+  // Nike copies at most 47 bytes so byte 48 is always the pad => always
+  // NUL-terminated for the parser's strlen().
+  if (Array.isArray(v)) { for (let i = 0; i < Math.min(v.length, 47); i++) out[i] = v[i] & 0xff; return out; }
+  for (let i = 0; i < Math.min(v.length, 47); i++) out[i] = v.charCodeAt(i);
   return out;
 };
+const tlvBool = (tag, v) => [(tag >> 8) & 0xff, tag & 0xff, 0x01, v ? 1 : 0];
 const tlvUint = (tag, v) => [(tag >> 8) & 0xff, tag & 0xff, 0x04,
   (v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff];
 const tlvInt64 = (tag, v) => { // v as JS number -> 8 bytes BE
@@ -1179,30 +1193,43 @@ const tlvInt64 = (tag, v) => { // v as JS number -> 8 bytes BE
   for (let i = 7; i >= 0; i--) b[i] = Number(n & 0xffn), n >>= 8n;
   return [(tag >> 8) & 0xff, tag & 0xff, 0x08, ...b];
 };
-const tlvStr = (tag, s) => [(tag >> 8) & 0xff, tag & 0xff,
-  ...Array.from(s || "", (c) => c.charCodeAt(0)), 0x00];
+// [tag BE][len][bytes] — length-prefixed, NO trailing NUL. Truncated to 255.
+const tlvStr = (tag, s) => {
+  const bytes = Array.from(String(s || ""), (c) => c.charCodeAt(0) & 0xff).slice(0, 255);
+  return [(tag >> 8) & 0xff, tag & 0xff, bytes.length, ...bytes];
+};
 
 function buildCanonicalBlob(opts = {}) {
   const o = {
     din: "", udi: "", group: "",
-    t01: 0, t02: 0, imprintState: 100,
-    t05: "", t06: "", t07: "", t0c: "", t0f: "",
+    metricWeight: 0, metricHeight: 0, imprintState: 100,
+    email: "", birthdate: "", screenName: "", firstName: "", bandName: "",
     profileUpdate: Math.floor(Date.now() / 1000),
-    include: null,   // null = all TLVs; else a Set of tags to include
+    clockAutoSet: 1,          // clear() default is 1
+    include: null,            // null = all TLVs; else a Set of tags to include
     ...opts,
   };
+  // Back-compat with the old positional option names.
+  if (opts.t01 !== undefined) o.metricWeight = opts.t01;
+  if (opts.t02 !== undefined) o.metricHeight = opts.t02;
+  if (opts.t05 !== undefined) o.email = opts.t05;
+  if (opts.t06 !== undefined) o.birthdate = opts.t06;
+  if (opts.t07 !== undefined) o.screenName = opts.t07;
+  if (opts.t0c !== undefined) o.firstName = opts.t0c;
+  if (opts.t0f !== undefined) o.bandName = opts.t0f;
+
   const want = (tag) => o.include === null || o.include.has(tag);
   const payload = [...field48(o.din), ...field48(o.udi), ...field48(o.group)];
-  if (want(0x01)) payload.push(...tlvUint(0x01, o.t01));
-  if (want(0x02)) payload.push(...tlvUint(0x02, o.t02));
+  if (want(0x01)) payload.push(...tlvBool(0x01, o.metricWeight));
+  if (want(0x02)) payload.push(...tlvBool(0x02, o.metricHeight));
   if (want(0x0b)) payload.push(...tlvUint(0x0b, o.imprintState));
-  if (want(0x05)) payload.push(...tlvStr(0x05, o.t05));
-  if (want(0x06)) payload.push(...tlvStr(0x06, o.t06));
-  if (want(0x07)) payload.push(...tlvStr(0x07, o.t07));
-  if (want(0x0c)) payload.push(...tlvStr(0x0c, o.t0c));
-  if (want(0x0f)) payload.push(...tlvStr(0x0f, o.t0f));
+  if (want(0x05)) payload.push(...tlvStr(0x05, o.email));
+  if (want(0x06)) payload.push(...tlvStr(0x06, o.birthdate));
+  if (want(0x07)) payload.push(...tlvStr(0x07, o.screenName));
+  if (want(0x0c)) payload.push(...tlvStr(0x0c, o.firstName));
+  if (want(0x0f)) payload.push(...tlvStr(0x0f, o.bandName));
   if (want(0x0d)) payload.push(...tlvInt64(0x0d, o.profileUpdate));
-  // 0x0e (unknown-items passthrough) intentionally empty for a fresh record
+  if (want(0x0e)) payload.push(...tlvBool(0x0e, o.clockAutoSet));
   const total = payload.length + 6;
   const crc = crc16xmodem(payload);
   return [(total >>> 24) & 0xff, (total >>> 16) & 0xff, (total >>> 8) & 0xff, total & 0xff,
@@ -1352,6 +1379,63 @@ async function autoImprint(dev) {
   try { nd.close(); } catch {}
 }
 
+// DECISIVE TEST: does the firmware PARSE the DesktopOptions record, or does it
+// just store the bytes opaquely and hand them back?
+//
+// Nike's own re-serializer normalizes: canonical tag order, bools re-emitted
+// with len=1, strings re-emitted at strlen(). So we write a deliberately
+// NON-CANONICAL but parseable record and compare the readback:
+//   readback normalized  -> the band parses DesktopOptions (content matters)
+//   readback byte-identical -> it's a blob store; the imprinted bit is NOT
+//                              gated on DesktopOptions content at all
+// This tells us whether to keep refining the record or abandon that path.
+async function echoTest(dev) {
+  console.log("\n=== PARSE-vs-ECHO TEST ===");
+  // Non-canonical: reversed tag order + a bool with the wrong length (4) +
+  // an unknown passthrough tag (0x03) in the middle.
+  const f48 = (s) => field48(s);
+  const payload = [...f48("42424242424242"), ...f48("42424242424242"), ...f48("1")];
+  payload.push(...tlvInt64(0x0d, Math.floor(Date.now() / 1000)));   // 0x0d first (non-canonical)
+  payload.push(...tlvStr(0x0f, "FuelBand"));
+  payload.push(...tlvUint(0x0b, 100));
+  payload.push(0x00, 0x03, 0x02, 0xaa, 0xbb);                        // unknown tag 0x03 mid-record
+  payload.push(0x00, 0x01, 0x04, 0x00, 0x00, 0x00, 0x01);            // bool 0x01 with WRONG len=4
+  const total = payload.length + 6;
+  const crc = crc16xmodem(payload);
+  const blob = [(total >>> 24) & 0xff, (total >>> 16) & 0xff, (total >>> 8) & 0xff, total & 0xff,
+                ...payload, (crc >> 8) & 0xff, crc & 0xff];
+  console.log(`wrote ${blob.length}B, non-canonical (0x0d,0x0f,0x0b,0x03,0x01-with-len-4)`);
+  console.log(`sent head: ${hex(blob.slice(0, 8))} ... tlv: ${hex(blob.slice(148, Math.min(blob.length, 200)))}`);
+
+  const x = new FuelBandTransfer(dev, { verbose: false });
+  try { await x.send(blob); } catch (e) { console.log(`write failed: ${e.message}`); return; }
+  await delay(250);
+
+  outWrite(dev, frameSys([0x50, 0x37, 0x36, 0x00, 0x00, 0x00]));
+  await delay(160);
+  let got = [];
+  for (const rid of [4, 3, 2, 1]) {
+    const r = tryRead(dev, rid);
+    if (!r.error && r.data && r.data.length > 8) { got = Array.prototype.slice.call(r.data, 3); break; }
+  }
+  if (!got.length) { console.log("no readback"); return; }
+  console.log(`readback : ${hex(got.slice(0, 64))}`);
+  // Compare the TLV region we can see against what we sent.
+  const sentTlv = hex(blob.slice(148, 148 + 24));
+  const gotTlv = hex(got.slice(4 + 148, 4 + 148 + 24));   // skip the 4-byte response header
+  console.log(`\n  sent TLV head: ${sentTlv}`);
+  console.log(`  read TLV head: ${gotTlv}`);
+  if (gotTlv && sentTlv === gotTlv) {
+    console.log("\n  => BYTE-IDENTICAL: the band is a BLOB STORE. It does not");
+    console.log("     re-serialize DesktopOptions, so the imprinted bit is almost");
+    console.log("     certainly NOT gated on the record's contents. Stop refining");
+    console.log("     the record; the gate is elsewhere (firmware/host sequence).");
+  } else if (gotTlv) {
+    console.log("\n  => NORMALIZED: the firmware PARSES and re-emits the record.");
+    console.log("     Content semantics matter — a correct record is worth pursuing.");
+  }
+}
+
 async function canonical(dev, doReset) {
   console.log("\n=== CANONICAL DESKTOPOPTIONS (full 10-TLV record) ===");
   // DIN/UDI are 14-digit NUMERIC strings (per tiferrei's working fake server:
@@ -1374,7 +1458,7 @@ async function canonical(dev, doReset) {
 async function minimize(dev) {
   console.log("\n=== FIELD-ELIMINATION (drop one TLV at a time) ===");
   const uuid = "12345678-1234-1234-1234-123456789abc";
-  const all = [0x01, 0x02, 0x0b, 0x05, 0x06, 0x07, 0x0c, 0x0f, 0x0d];
+  const all = [0x01, 0x02, 0x0b, 0x05, 0x06, 0x07, 0x0c, 0x0f, 0x0d, 0x0e];
   const base = { din: uuid, udi: uuid, group: "1", imprintState: 100 };
   await writeAndVerify(dev, buildCanonicalBlob({ ...base, include: new Set(all) }), "FULL (all TLVs)");
   for (const drop of all) {
@@ -2057,6 +2141,9 @@ async function dumpMemory(dev, maxBytes = 320) {
       await identity(dev);
       if (which === "refresh") await tokenTest(dev, 0x41);
       else await tokenTest(dev, 0x40);
+    } else if (process.argv.includes("--echotest")) {
+      await identity(dev);
+      await echoTest(dev);
     } else if (process.argv.includes("--canonical")) {
       await identity(dev);
       await canonical(dev, process.argv.includes("--reset"));
