@@ -1279,8 +1279,12 @@ async function fullImprint(dev, doReset) {
   }
 
   // 3. full DDB with tokens embedded (0x05/06/07) + imprint_state.
-  // 100 (0x64) is the COMPLETE value per the run-state derivation above.
-  for (const state of [100, 99, 0x14]) {
+  // Real ImprintingState enum (7-entry table, Nike+ Connect .rdata):
+  //   0=Fresh 3=TimeSet 5=DinGenerated 0x0A=SetupComplete
+  //   0x14=InFirstCharge 0x1E=FirstChargeComplete 0x64=Complete
+  // 0x64 is what the app writes on completion and what every "is imprinting
+  // finished" check compares against (cmp 0x64). Try the terminal states.
+  for (const state of [0x64, 0x1e, 0x14, 0x0a]) {
     const blob = buildCanonicalBlob({ din, udi, group: "1", imprintState: state,
       t05: accessTok, t06: refreshTok, t07: udi, t0c: "user", t0f: "Fuel" });
     const x = new FuelBandTransfer(dev, { verbose: false });
@@ -1396,7 +1400,7 @@ async function idFuzz(dev) {
   const cases = [
     ["DIN=14-digit numeric",  { din: "42424242424242", udi: "42424242424243", group: "1" }],
     ["numeric + imprint=100", { din: "42424242424242", udi: "42424242424243", group: "1", imprintState: 100 }],
-    ["numeric + imprint=99",  { din: "42424242424242", udi: "42424242424243", group: "1", imprintState: 99 }],
+    ["numeric + imprint=0x0a",{ din: "42424242424242", udi: "42424242424243", group: "1", imprintState: 0x0a }],
     ["DIN=16xFF legacy",     { din: ff16, udi: ff16, group: ff16 }],
     ["DIN=48xFF",            { din: ff48, udi: ff48, group: ff48 }],
     ["DIN=FF uuid-string",   { din: "ffffffff-ffff-ffff-ffff-ffffffffffff", udi: "ffffffff-ffff-ffff-ffff-ffffffffffff", group: "1" }],
