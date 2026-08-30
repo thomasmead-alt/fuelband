@@ -1295,14 +1295,18 @@ async function fullImprint(dev, doReset) {
   // 0x02 and 0x12 are even, so no 4-byte offset tail (that's only when state&1).
   // saveRunState then emits timestamp-assessment-start (42 02) if state&0x02,
   // and timestamp-device-init (42 01) if state&0x10.
-  for (const st of [0x02, 0x12]) {
+  // imprint_state 0x64 derives run-state 0x12, and 0x12 has BOTH bit 0x02 and
+  // bit 0x10 set, so saveRunState fires both timestamp reads. 0x12 is even, so
+  // no 4-byte offset tail. This is the exact traffic a completed imprint emits.
+  {
+    const st = 0x12;
     outWrite(dev, frameSys([0x28, 0xf1, 0x29, st]));
     await delay(150);
     console.log(`  run-state 0x${st.toString(16)}: reply ${hex(tryRead(dev, 1).data || []) || "-"}`);
-    if (st & 0x02) { outWrite(dev, frameSys([0x42, 0x02])); await delay(120);
-      console.log(`    ts assessment-start (42 02): ${hex(tryRead(dev, 1).data || []) || "-"}`); }
-    if (st & 0x10) { outWrite(dev, frameSys([0x42, 0x01])); await delay(120);
-      console.log(`    ts device-init (42 01): ${hex(tryRead(dev, 1).data || []) || "-"}`); }
+    outWrite(dev, frameSys([0x42, 0x02])); await delay(120);
+    console.log(`    ts assessment-start (42 02): ${hex(tryRead(dev, 1).data || []) || "-"}`);
+    outWrite(dev, frameSys([0x42, 0x01])); await delay(120);
+    console.log(`    ts device-init (42 01): ${hex(tryRead(dev, 1).data || []) || "-"}`);
   }
 
   // 3. full DDB with tokens embedded (0x05/06/07) + imprint_state.
@@ -1311,6 +1315,8 @@ async function fullImprint(dev, doReset) {
   //   0x14=InFirstCharge 0x1E=FirstChargeComplete 0x64=Complete
   // 0x64 is what the app writes on completion and what every "is imprinting
   // finished" check compares against (cmp 0x64). Try the terminal states.
+  // Primary pass is the exact app record (0x64 = Complete). The later values are
+  // a fallback sweep only, tried if Complete doesn't take.
   for (const state of [0x64, 0x1e, 0x14, 0x0a]) {
     const blob = buildCanonicalBlob({ din, udi, group: "1", imprintState: state,
       t05: accessTok, t06: refreshTok, t07: udi, t0c: "user", t0f: "Fuel" });
