@@ -1708,6 +1708,37 @@ async function tokenTest(dev, opcode = 0x40, token = null) {
   return after.bit === 1;
 }
 
+// Internal-memory bank read (startReadMemoryInt). Verified from the Mac plugin:
+//   submit(0x52, [0x37, <bank>, 0x00, 0x00, 0x00])
+// 0x37 is a payload sub-command byte, NOT the opcode. Nike only ever calls this
+// with bank 0x06 (doReadMemoryIntFaultLog). Sweeping the other banks is a
+// READ-ONLY probe of the device's internal flash partitions — the imprint flag
+// and identity have to live in one of them, and we have never looked.
+async function memBanks(dev, from = 0, to = 15) {
+  console.log("\n=== INTERNAL MEMORY BANK SWEEP (0x52 / sub-cmd 0x37) — read-only ===");
+  console.log("bank | reply");
+  for (let bank = from; bank <= to; bank++) {
+    const cmd = [0x52, 0x37, bank & 0xff, 0x00, 0x00, 0x00];
+    outWrite(dev, frameSys(cmd));
+    await delay(160);
+    let best = null;
+    for (const rid of [4, 3, 2, 1]) {
+      const r = tryRead(dev, rid);
+      if (!r.error && r.data && r.data.length > 3) {
+        const b = Array.prototype.slice.call(r.data, 0);
+        if (!best || b.length > best.length) best = b;
+      }
+    }
+    const note = bank === 0x06 ? "  (fault log — the only bank Nike uses)" : "";
+    if (!best) { console.log(` 0x${bank.toString(16).padStart(2, "0")} | -${note}`); continue; }
+    const body = best.slice(3);
+    const live = body.some((x) => x !== 0x00 && x !== 0xff);
+    console.log(` 0x${bank.toString(16).padStart(2, "0")} | ${hex(best.slice(0, 24))}${live ? "  <DATA>" : ""}${note}`);
+    await delay(80);
+  }
+  console.log("\nBanks marked <DATA> hold real content — worth paging through.");
+}
+
 // Read the SYSTEM-RESERVED region (doReadSystemReserved, opcode 0xce).
 // Derived from the Mac plugin (fuelbandplugin.dylib, i386): the method does
 // submit(0xce, [N]) where N is the byte count to read, reply on the feature
@@ -2141,6 +2172,12 @@ async function dumpMemory(dev, maxBytes = 320) {
       await identity(dev);
       if (which === "refresh") await tokenTest(dev, 0x41);
       else await tokenTest(dev, 0x40);
+    } else if (process.argv.includes("--membanks")) {
+      const mi = process.argv.indexOf("--membanks");
+      const a = parseInt(process.argv[mi + 1] ?? "0", 16);
+      const b = parseInt(process.argv[mi + 2] ?? "f", 16);
+      await identity(dev);
+      await memBanks(dev, isNaN(a) ? 0 : a, isNaN(b) ? 15 : b);
     } else if (process.argv.includes("--echotest")) {
       await identity(dev);
       await echoTest(dev);
