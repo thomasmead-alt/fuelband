@@ -103,7 +103,36 @@ node fuelband-dump.js --token               # access-token write (0x40), never s
 
 ---
 
-## Step 3 — The fake-server route (NOT REQUIRED)
+## Step 3 — Make it yours, and get data back out
+
+Once `imprinted = 1`, set the profile the band uses to calculate fuel. Units are
+explicit, so nothing is ambiguous (`78kg`/`172lb`, `180cm`/`71in`/`5ft10`).
+
+```sh
+node fuelband-dump.js --readprofile          # what's on the band right now
+
+node fuelband-dump.js --setprofile \
+    --weight 78kg --height 180cm --age 34 --gender M \
+    --goal 3000 --metric 1 --24h 1
+```
+
+Every field is read back after writing, and the output says what changed. A
+field that already matched shows as *unchanged* — that is not a failure.
+
+Export the current counters:
+
+```sh
+node fuelband-dump.js --export               # → fuelband-export.{json,csv}
+```
+
+This is **current totals only** — fuel, plus the two counters believed to be
+steps and calories. The band's per-workout sample store is not decoded, so there
+is no historical export. Full detail, plus the Apple Health route, is in
+[`HEALTH.md`](HEALTH.md).
+
+---
+
+## Step 4 — The fake-server route (NOT REQUIRED)
 
 > Activation does not need this. Both bands were activated with Steps 1–2 alone.
 > Kept only as reference for the retired web API.

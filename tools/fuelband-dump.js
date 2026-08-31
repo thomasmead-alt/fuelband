@@ -1869,6 +1869,166 @@ async function dumpBank(dev, bank, maxBlocks = 64) {
   return all;
 }
 
+// ---- Profile setters ------------------------------------------------------
+// Encodings taken from the plugin's own scaling constants, not guessed:
+//   weight: kg * 2.20462262 * 10  -> u16   (tenths of a POUND)
+//   height: inches * 4            -> u16   (QUARTER-INCHES; cm/2.54 to convert)
+//   age:    years                 -> u8
+//   gender: single ASCII char     ('M'/'F'; a factory band reads 'U' = unset)
+//   goal:   [type][goal:3 BE]     (type 0 = current day)
+// Every write is followed by a read-back so the caller sees what actually stuck.
+const kgToWire = (kg) => Math.round(kg * 2.20462262 * 10);
+const wireToKg = (w) => w / 10 / 2.20462262;
+const cmToWire = (cm) => Math.round((cm / 2.54) * 4);
+const wireToCm = (w) => (w / 4) * 2.54;
+
+async function setProfile(dev, opts) {
+  console.log("\n=== SET PROFILE ===");
+  const results = [];
+  const wr = async (label, cmd, readCmd, decode) => {
+    outWrite(dev, frameSys(readCmd)); await delay(110);
+    const before = tryRead(dev, 1).data || [];
+    outWrite(dev, frameSys(cmd)); await delay(150);
+    const reply = tryRead(dev, 1).data || [];
+    await delay(110);
+    outWrite(dev, frameSys(readCmd)); await delay(110);
+    const after = tryRead(dev, 1).data || [];
+    const changed = hex(before) !== hex(after);
+    const shown = decode ? decode(after) : "";
+    console.log(`  ${label.padEnd(10)} sent ${hex(cmd)}`);
+    console.log(`  ${"".padEnd(10)} now  ${hex(after) || "-"}${shown ? `   = ${shown}` : ""}` +
+                `${changed ? "   *set*" : "   (unchanged)"}`);
+    results.push({ label, changed, raw: after });
+  };
+  const u16 = (v) => [(v >> 8) & 0xff, v & 0xff];
+  const val16 = (d) => (d && d.length >= 5) ? ((d[3] << 8) | d[4]) : null;
+
+  if (opts.weightKg != null) {
+    const w = kgToWire(opts.weightKg);
+    await wr("weight", [0x33, ...u16(w)], [0x33],
+      (d) => { const v = val16(d); return v == null ? "" :
+        `${wireToKg(v).toFixed(1)} kg (${(v / 10).toFixed(1)} lb)`; });
+  }
+  if (opts.heightCm != null) {
+    const h = cmToWire(opts.heightCm);
+    await wr("height", [0x34, ...u16(h)], [0x34],
+      (d) => { const v = val16(d); return v == null ? "" :
+        `${wireToCm(v).toFixed(1)} cm (${(v / 4).toFixed(2)} in)`; });
+  }
+  if (opts.age != null)
+    await wr("age", [0x35, opts.age & 0xff], [0x35],
+      (d) => (d && d.length >= 4) ? `${d[3]} years` : "");
+  if (opts.gender != null) {
+    const g = opts.gender.toUpperCase().charCodeAt(0);
+    await wr("gender", [0x36, g], [0x36],
+      (d) => (d && d.length >= 4) ? `'${String.fromCharCode(d[3])}'` : "");
+  }
+  if (opts.goal != null)
+    await wr("goal", [0x25, 0x00, (opts.goal >> 16) & 0xff, (opts.goal >> 8) & 0xff, opts.goal & 0xff],
+      [0x25, 0x00],
+      (d) => (d && d.length >= 7) ? `${(d[4] << 16) | (d[5] << 8) | d[6]} fuel` : "");
+  if (opts.metric != null)
+    await wr("metric", [0x32, opts.metric ? 1 : 0], [0x32],
+      (d) => (d && d.length >= 4) ? (d[3] ? "metric" : "imperial") : "");
+  if (opts.is24h != null)
+    await wr("24-hour", [0x31, opts.is24h ? 1 : 0], [0x31],
+      (d) => (d && d.length >= 4) ? (d[3] ? "24-hour" : "12-hour") : "");
+
+  const stuck = results.filter((r) => r.changed).length;
+  console.log(`\n  ${stuck}/${results.length} value(s) changed on the band.`);
+  console.log("  (A value already equal to what you set shows as unchanged — that's fine.)");
+}
+
+// Read the current profile back off the band.
+async function readProfile(dev) {
+  console.log("\n=== CURRENT PROFILE ===");
+  const rd = async (label, cmd, decode) => {
+    outWrite(dev, frameSys(cmd)); await delay(120);
+    const d = tryRead(dev, 1).data || [];
+    console.log(`  ${label.padEnd(10)} ${hex(d) || "-"}   ${d.length ? decode(d) : ""}`);
+  };
+  const val16 = (d) => (d && d.length >= 5) ? ((d[3] << 8) | d[4]) : null;
+  await rd("weight", [0x33], (d) => { const v = val16(d); return v == null ? "" :
+    `${wireToKg(v).toFixed(1)} kg / ${(v / 10).toFixed(1)} lb`; });
+  await rd("height", [0x34], (d) => { const v = val16(d); return v == null ? "" :
+    `${wireToCm(v).toFixed(1)} cm / ${(v / 4).toFixed(2)} in`; });
+  await rd("age",    [0x35], (d) => d.length >= 4 ? `${d[3]} years` : "");
+  await rd("gender", [0x36], (d) => d.length >= 4 ? `'${String.fromCharCode(d[3])}'` : "");
+  await rd("goal",   [0x25, 0x00], (d) => d.length >= 7 ? `${(d[4] << 16) | (d[5] << 8) | d[6]} fuel` : "");
+  await rd("metric", [0x32], (d) => d.length >= 4 ? (d[3] ? "metric" : "imperial") : "");
+  await rd("24-hour",[0x31], (d) => d.length >= 4 ? (d[3] ? "24-hour" : "12-hour") : "");
+  await rd("fuel",   [0x24], (d) => d.length >= 6 ? `${(d[3] << 16) | (d[4] << 8) | d[5]}` : "");
+}
+
+// ---- Export for Apple Health / anything else ------------------------------
+// Honest scope: this exports the band's CURRENT running totals, not history.
+// The band's per-sample workout store (0x17 sample-query / 0x19 read-memory)
+// has never been decoded publicly and is not decoded here — see HEALTH.md.
+// Health has no concept of "fuel", so only the counters that map to real Health
+// types (steps, active energy) are marked importable; fuel is carried alongside
+// as a plain number.
+async function exportHealth(dev, outPath) {
+  const fs = require("fs");
+  console.log("\n=== EXPORT ===");
+  const rd = async (cmd) => {
+    outWrite(dev, frameSys(cmd)); await delay(120);
+    return tryRead(dev, 1).data || [];
+  };
+  const u24 = (d, at = 3) => (d && d.length >= at + 3)
+    ? ((d[at] << 16) | (d[at + 1] << 8) | d[at + 2]) : null;
+
+  const ver = await readSystem(dev, [0x08]);
+  const ser = await readSystem(dev, [0xe1]);
+
+  const fuelD  = await rd([0x24]);
+  const goalD  = await rd([0x25, 0x00]);
+  const aD     = await rd([0x2a]);
+  const bD     = await rd([0x2b]);
+  const clockD = await rd([0x21]);
+
+  const bandClock = (clockD && clockD.length >= 7)
+    ? ((clockD[3] << 24) | (clockD[4] << 16) | (clockD[5] << 8) | clockD[6]) >>> 0 : null;
+
+  const rec = {
+    exportedAt: new Date().toISOString(),
+    band: {
+      serial: ser ? ascii(ser).replace(/\0+$/, "").trim() : null,
+      firmware: ver ? ascii(ver).replace(/\.+$/, "") : null,
+      clockUnix: bandClock,
+      clockIso: bandClock ? new Date(bandClock * 1000).toISOString() : null,
+    },
+    // Current totals as the band reports them right now.
+    totals: {
+      fuel: u24(fuelD),
+      goal: goalD && goalD.length >= 7 ? u24(goalD, 4) : null,
+      // 0x2a / 0x2b are the same 3-byte width as fuel and are believed to be
+      // steps and calories. Labelled "counterA/B" as well so nobody treats the
+      // mapping as confirmed — check them against a day you actually walked.
+      counterA: u24(aD), counterB: u24(bD),
+      stepsProbable: u24(aD), caloriesProbable: u24(bD),
+    },
+    raw: { fuel: hex(fuelD), goal: hex(goalD), x2a: hex(aD), x2b: hex(bD), clock: hex(clockD) },
+    note: "Current running totals only. Per-workout history is not decoded.",
+  };
+
+  const base = outPath || "fuelband-export";
+  fs.writeFileSync(`${base}.json`, JSON.stringify(rec, null, 2));
+  const csv = [
+    "date,metric,value,unit",
+    `${rec.exportedAt},fuel,${rec.totals.fuel ?? ""},fuel`,
+    `${rec.exportedAt},steps,${rec.totals.stepsProbable ?? ""},count`,
+    `${rec.exportedAt},active_energy,${rec.totals.caloriesProbable ?? ""},kcal`,
+  ].join("\n") + "\n";
+  fs.writeFileSync(`${base}.csv`, csv);
+
+  console.log(`  fuel     ${rec.totals.fuel ?? "-"}   (goal ${rec.totals.goal ?? "-"})`);
+  console.log(`  0x2a     ${rec.totals.counterA ?? "-"}   likely steps`);
+  console.log(`  0x2b     ${rec.totals.counterB ?? "-"}   likely calories`);
+  console.log(`\n  wrote ${base}.json and ${base}.csv`);
+  console.log("  To get these into Apple Health, see tools/HEALTH.md.");
+  return rec;
+}
+
 // Read the SYSTEM-RESERVED region (doReadSystemReserved, opcode 0xce).
 // Derived from the Mac plugin (fuelbandplugin.dylib, i386): the method does
 // submit(0xce, [N]) where N is the byte count to read, reply on the feature
@@ -2329,6 +2489,83 @@ async function dumpMemory(dev, maxBytes = 320) {
   }
 }
 
+// Parse the named arguments for --setprofile. Units are explicit so nobody has
+// to guess which system a bare number is in:
+//   --weight 78kg | 172lb        --height 180cm | 71in | 5ft10
+//   --age 34   --gender M|F   --goal 3000   --metric 0|1   --24h 0|1
+// Returns null (after printing why) if an argument is unusable, so we never
+// write a nonsense value to the band.
+function parseProfileArgs(argv) {
+  const get = (name) => {
+    const i = argv.indexOf(name);
+    return (i >= 0 && argv[i + 1] && !argv[i + 1].startsWith("--")) ? argv[i + 1] : null;
+  };
+  const bad = (name, v, why) => {
+    console.log(`Bad value for ${name}: "${v}" — ${why}. Nothing was written.`);
+    return null;
+  };
+  const opts = {};
+
+  const w = get("--weight");
+  if (w != null) {
+    const m = /^([\d.]+)\s*(kg|lb|lbs)?$/i.exec(w.trim());
+    if (!m) return bad("--weight", w, "expected e.g. 78kg or 172lb");
+    const n = parseFloat(m[1]);
+    const kg = /^lb/i.test(m[2] || "kg") ? n * 0.45359237 : n;
+    if (!(kg > 2 && kg < 300)) return bad("--weight", w, "outside 2–300 kg");
+    opts.weightKg = kg;
+  }
+
+  const h = get("--height");
+  if (h != null) {
+    const s = h.trim();
+    let cm = null;
+    let m;
+    if ((m = /^([\d.]+)\s*(?:ft|')\s*([\d.]+)?\s*(?:in|")?$/i.exec(s)))
+      cm = (parseFloat(m[1]) * 12 + parseFloat(m[2] || "0")) * 2.54;
+    else if ((m = /^([\d.]+)\s*(?:in|")$/i.exec(s))) cm = parseFloat(m[1]) * 2.54;
+    else if ((m = /^([\d.]+)\s*(?:cm|c)?$/i.exec(s))) cm = parseFloat(m[1]);  // bare number = cm
+    if (cm == null) return bad("--height", h, "expected e.g. 180cm, 71in or 5ft10");
+    if (!(cm > 50 && cm < 260)) return bad("--height", h, "outside 50–260 cm");
+    opts.heightCm = cm;
+  }
+
+  const a = get("--age");
+  if (a != null) {
+    const n = parseInt(a, 10);
+    if (!(n >= 5 && n <= 120)) return bad("--age", a, "expected whole years, 5–120");
+    opts.age = n;
+  }
+
+  const g = get("--gender");
+  if (g != null) {
+    const c = g.trim().toUpperCase()[0];
+    if (c !== "M" && c !== "F") return bad("--gender", g, "expected M or F");
+    opts.gender = c;
+  }
+
+  const goal = get("--goal");
+  if (goal != null) {
+    const n = parseInt(goal, 10);
+    if (!(n >= 0 && n <= 0xffffff)) return bad("--goal", goal, "expected 0–16777215 fuel");
+    opts.goal = n;
+  }
+
+  const metric = get("--metric");
+  if (metric != null) {
+    if (!/^[01]$/.test(metric.trim())) return bad("--metric", metric, "expected 0 or 1");
+    opts.metric = metric.trim() === "1";
+  }
+
+  const h24 = get("--24h");
+  if (h24 != null) {
+    if (!/^[01]$/.test(h24.trim())) return bad("--24h", h24, "expected 0 or 1");
+    opts.is24h = h24.trim() === "1";
+  }
+
+  return opts;
+}
+
 // --- Main -----------------------------------------------------------------
 
 (async () => {
@@ -2399,6 +2636,25 @@ async function dumpMemory(dev, maxBytes = 320) {
     } else if (process.argv.includes("--provision")) {
       await identity(dev);
       await provision(dev);
+    } else if (process.argv.includes("--export")) {
+      const ei = process.argv.indexOf("--export");
+      const p = process.argv[ei + 1];
+      await exportHealth(dev, (p && !p.startsWith("--")) ? p : null);
+    } else if (process.argv.includes("--readprofile")) {
+      await identity(dev);
+      await readProfile(dev);
+    } else if (process.argv.includes("--setprofile")) {
+      const opts = parseProfileArgs(process.argv);
+      if (opts == null) return;                     // parse error already reported
+      if (Object.keys(opts).length === 0) {
+        console.log("Nothing to set. Example:");
+        console.log("  node fuelband-dump.js --setprofile --weight 78kg --height 180cm \\");
+        console.log("      --age 34 --gender M --goal 3000 --metric 1 --24h 1");
+        return;
+      }
+      await identity(dev);
+      await setProfile(dev, opts);
+      await readProfile(dev);
     } else if (process.argv.includes("--sysreserved")) {
       const si = process.argv.indexOf("--sysreserved");
       const a = parseInt(process.argv[si + 1] ?? "0", 16);

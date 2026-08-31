@@ -129,10 +129,10 @@ against full disassembly of individual handlers.
 | `0x24` | fuel | — (read) |
 | `0x25` | **goal** | `[type:1][goal:3 BE]` |
 | `0x31` | **24-hour mode** | `[bool:1]` |
-| `0x32` | metric units | |
-| `0x33` | weight | 2 bytes |
-| `0x34` | height | 2 bytes |
-| `0x35` | age | |
+| `0x32` | metric units | `[bool:1]` — display only; storage is always imperial |
+| `0x33` | weight | `u16` = kg x 2.20462262 x 10 -> **tenths of a pound** |
+| `0x34` | height | `u16` = inches x 4 -> **quarter-inches** (cm / 2.54 to convert) |
+| `0x35` | age | `[years:1]` |
 | `0x36` | gender | reads `0x55` = ASCII `'U'` (unspecified) on a factory band |
 | `0x37` | display orientation | |
 | `0x38` | display goal options | |
@@ -164,7 +164,7 @@ below are from factory-state bands.
 | `0x1d` | `02 02` | |
 | `0x26` | `00 00 00 01 00 00 00 01` | two BE32 `1`s |
 | `0x27` | `00` | |
-| `0x2a`, `0x2b` | `00 00 00` | same 3-byte width as fuel/goal — plausibly steps and calories |
+| `0x2a`, `0x2b` | `00 00 00` | same 3-byte width as fuel/goal — plausibly steps and calories. `--export` reads these as steps/calories but also emits them as `counterA`/`counterB`; the mapping is circumstantial, not confirmed against a walked day. |
 | `0x54` | `02` | |
 | `0xc2` | `ff…ff d6 c3 4a 37 34 23` | trailing 6 bytes look like a **BLE MAC address** |
 | `0xcb` | `00 00` | |

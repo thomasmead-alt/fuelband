@@ -18,6 +18,8 @@
 *.key
 mitm-log.txt
 tools/fuelband-dump.bin
+fuelband-export.json
+fuelband-export.csv
 *-dump.txt
 *-banks.txt
 *-ddb.txt

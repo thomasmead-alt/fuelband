@@ -44,6 +44,16 @@
   details { margin-top: 10px; }
   summary { cursor: pointer; color: var(--muted); font-size: .9rem; }
   .hint { font-size:.85rem; color:var(--muted); margin-top:10px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:14px; }
+  .grid label { display:flex; flex-direction:column; gap:5px; font-size:.9rem;
+                font-weight:600; color:var(--ink); }
+  .pair { display:flex; gap:6px; }
+  .pair input { flex:1; min-width:0; }
+  input, select { font:inherit; font-weight:400; color:var(--ink); background:var(--bg);
+                  border:1px solid var(--line); border-radius:7px; padding:9px 10px; }
+  input:focus, select:focus { outline:2px solid var(--accent); outline-offset:-1px; }
+  a.dl { display:inline-block; font-weight:600; text-decoration:none; color:var(--accent);
+         border:1px solid var(--accent); border-radius:8px; padding:11px 18px; }
 </style>
 </head>
 <body>
@@ -89,6 +99,72 @@
   </div>
 
   <div class="card">
+    <h2>3. Your details</h2>
+    <p>The band uses your height, weight, age and sex to work out how much fuel
+    you've earned. Fill in what you know and press Save — leave anything blank
+    to keep what's already on the band.</p>
+    <form id="profile" class="grid">
+      <label>Weight
+        <span class="pair">
+          <input name="weight" type="number" step="0.1" min="1" placeholder="e.g. 78">
+          <select name="weightUnit"><option value="kg">kg</option><option value="lb">lb</option></select>
+        </span>
+      </label>
+      <label>Height
+        <span class="pair">
+          <input name="height" type="number" step="0.1" min="1" placeholder="e.g. 180">
+          <select name="heightUnit"><option value="cm">cm</option><option value="in">inches</option></select>
+        </span>
+      </label>
+      <label>Age <input name="age" type="number" min="5" max="120" placeholder="years"></label>
+      <label>Sex
+        <select name="gender">
+          <option value="">— leave as is —</option>
+          <option value="M">Male</option><option value="F">Female</option>
+        </select>
+      </label>
+      <label>Daily fuel goal <input name="goal" type="number" min="0" placeholder="e.g. 3000"></label>
+      <label>Units shown on band
+        <select name="metric">
+          <option value="">— leave as is —</option>
+          <option value="1">Metric (kg, cm)</option><option value="0">Imperial (lb, in)</option>
+        </select>
+      </label>
+      <label>Clock
+        <select name="h24">
+          <option value="">— leave as is —</option>
+          <option value="0">12-hour</option><option value="1">24-hour</option>
+        </select>
+      </label>
+    </form>
+    <div class="row" style="margin-top:14px">
+      <button data-action="setprofile">Save to band</button>
+      <button class="secondary" data-action="readprofile">Read what's on the band</button>
+    </div>
+    <p class="hint">Every value is read back off the band after it's written, so
+    the output below shows what actually stuck.</p>
+  </div>
+
+  <div class="card">
+    <h2>4. Get your activity out</h2>
+    <p>Reads the band's current fuel, step and calorie counters and saves them as
+    a spreadsheet (CSV) and a data file (JSON) you can keep or import.</p>
+    <div class="row">
+      <button data-action="export">Export activity</button>
+      <a id="dlcsv" class="dl" href="/download?f=csv" download hidden>Download spreadsheet</a>
+      <a id="dljson" class="dl" href="/download?f=json" download hidden>Download data file</a>
+    </div>
+    <p class="hint">
+      <strong>Apple Health:</strong> Health can't be written to from a computer,
+      so the last hop is on your iPhone — copy the CSV across and use a Shortcut
+      with the “Log Health Sample” action. Step-by-step instructions are in
+      <code>tools/HEALTH.md</code>. Note this exports the band's <em>current
+      totals</em>, not a day-by-day history — the band's workout history has
+      never been decoded.
+    </p>
+  </div>
+
+  <div class="card">
     <h2>Output</h2>
     <p>The technical detail, in case you need it or want to share it when asking for help.</p>
     <pre id="out">Ready. Plug in your band and press “Check band”.</pre>
@@ -114,7 +190,7 @@ const buttons = [...document.querySelectorAll("button[data-action]")];
 function setBusy(b) { buttons.forEach((x) => x.disabled = b); }
 
 // Turn the raw tool output into one plain-English line.
-function interpret(text) {
+function interpret(text, action) {
   // Setup problems first — these produce alarming stack traces.
   if (/dlopen|Cannot find module|MODULE_NOT_FOUND|NODE_MODULE_VERSION/i.test(text))
     return ["no", "Setup isn't finished. Close this window and the black window, " +
@@ -124,6 +200,18 @@ function interpret(text) {
                   "usually needs extra permissions; on a Mac, try a different USB port."];
   if (/no fuelband found|could not open|device not found/i.test(text))
     return ["no", "Band not found — check the cable, then unplug and replug it."];
+  if (action === "setprofile") {
+    const s = text.match(/(\d+)\/(\d+) value\(s\) changed/);
+    if (!s) return ["no", "Couldn't save — check the output below."];
+    return s[2] === "0"
+      ? ["no", "Nothing was sent to the band."]
+      : ["ok", `Saved. ${s[1]} of ${s[2]} value(s) changed on the band` +
+               `${s[1] === s[2] ? "." : " — the rest already matched what you entered."}`];
+  }
+  if (action === "export")
+    return /wrote .*\.json/.test(text)
+      ? ["ok", "Exported. Use the download buttons to save the files."]
+      : ["no", "Export didn't complete — check the output below."];
   // Read the imprinted flag from the checklist line specifically.
   const m = text.match(/imprinted\s*=\s*([01])/);
   if (m) return m[1] === "1"
@@ -133,12 +221,42 @@ function interpret(text) {
   return [null, null];
 }
 
+// Convert the form to the metric values the server expects. Anything left blank
+// is simply not sent, so the band keeps whatever it already had.
+function profileQuery() {
+  const f = document.getElementById("profile");
+  const v = (n) => f.elements[n].value.trim();
+  const q = new URLSearchParams();
+  if (v("weight")) {
+    const n = parseFloat(v("weight"));
+    q.set("weightKg", (f.elements.weightUnit.value === "lb" ? n * 0.45359237 : n).toFixed(1));
+  }
+  if (v("height")) {
+    const n = parseFloat(v("height"));
+    q.set("heightCm", (f.elements.heightUnit.value === "in" ? n * 2.54 : n).toFixed(1));
+  }
+  for (const k of ["age", "goal", "gender", "metric", "h24"]) if (v(k)) q.set(k, v(k));
+  return q;
+}
+
 async function run(action) {
+  let query = "";
+  if (action === "setprofile") {
+    const q = profileQuery();
+    if ([...q.keys()].length === 0) {
+      verdict.textContent = "Nothing filled in yet — enter at least one value above.";
+      verdict.className = "result no";
+      verdict.hidden = false;
+      return;
+    }
+    query = "&" + q.toString();
+  }
   setBusy(true);
   verdict.hidden = true;
+  document.querySelectorAll("a.dl").forEach((a) => a.hidden = true);
   out.textContent = "Working… (this can take a minute; don't unplug the band)\n\n";
   try {
-    const res = await fetch(`/run?action=${encodeURIComponent(action)}`);
+    const res = await fetch(`/run?action=${encodeURIComponent(action)}${query}`);
     const reader = res.body.getReader();
     const dec = new TextDecoder();
     let all = "";
@@ -150,7 +268,9 @@ async function run(action) {
       out.textContent += chunk;
       out.scrollTop = out.scrollHeight;
     }
-    const [kind, msg] = interpret(all);
+    if (action === "export" && /wrote .*\.json/.test(all))
+      document.querySelectorAll("a.dl").forEach((a) => a.hidden = false);
+    const [kind, msg] = interpret(all, action);
     if (msg) {
       verdict.textContent = msg;
       verdict.className = "result " + kind;

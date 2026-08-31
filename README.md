@@ -51,6 +51,19 @@ node fuelband-dump.js --provision     # profile: goal, metric, gender, 24h, cloc
 node fuelband-dump.js --checklist     # imprinted = 1
 ```
 
+Then set it up for yourself and get data back out:
+
+```sh
+node fuelband-dump.js --readprofile   # height, weight, age, sex, goal, units
+node fuelband-dump.js --setprofile --weight 78kg --height 180cm --age 34 \
+                      --gender M --goal 3000 --metric 1 --24h 1
+node fuelband-dump.js --export        # fuel/step/calorie counters → CSV + JSON
+```
+
+See **[`tools/HEALTH.md`](tools/HEALTH.md)** for the details, including how to
+get the CSV into Apple Health — and what the band *can't* give you (there is no
+decoded workout history; the export is current totals only).
+
 ## Documentation
 
 | File | What's in it |
@@ -58,6 +71,8 @@ node fuelband-dump.js --checklist     # imprinted = 1
 | [`tools/PROTOCOL.md`](tools/PROTOCOL.md) | The USB wire protocol, settings-record format, activation findings |
 | [`tools/NIKE-CONNECT-ARCHITECTURE.md`](tools/NIKE-CONNECT-ARCHITECTURE.md) | How the original desktop software is built |
 | [`tools/RUNBOOK.md`](tools/RUNBOOK.md) | Ordered, copy-pasteable commands |
+| [`tools/HEALTH.md`](tools/HEALTH.md) | Setting your details, exporting activity, the Apple Health route |
+| [`tools/gui/`](tools/gui/) | Button-driven local app for people who'd rather not use a terminal |
 | [`tools/mitm/`](tools/mitm/) | *Not required for activation.* Reference notes on the retired web API |
 
 ## ⚠️ Safety

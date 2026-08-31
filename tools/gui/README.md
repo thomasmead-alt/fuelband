@@ -26,8 +26,23 @@ version). Install it once, then you never need to think about it again.
 5. If it isn't, press **Activate — step 1**, wait for it to finish (the band
    restarts partway through — that's normal), then **Activate — step 2**.
 6. Press **Check band** again. It should say the band is activated.
+7. Fill in **Your details** — height, weight, age, sex, daily goal — and press
+   **Save to band**. The band needs these to work out your fuel properly.
+8. **Get your activity out** exports your current fuel, step and calorie
+   counters as a spreadsheet you can download.
 
 When you're done, close the browser tab and the black window.
+
+## Apple Health
+
+The export gives you a CSV. Apple won't let a computer write into Health
+directly, so the last step happens on your iPhone with a Shortcut — the
+instructions are in [`../HEALTH.md`](../HEALTH.md).
+
+Worth knowing before you start: this exports the band's **current totals**, not
+a day-by-day history. The band's stored workout history has never been decoded
+by anyone, so there's no way to recover past days — only to start collecting
+from now on.
 
 ## If something goes wrong
 

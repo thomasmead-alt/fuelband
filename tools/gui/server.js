@@ -21,16 +21,59 @@ const TOOL = path.join(DIR, "..", "fuelband-dump.js");
 
 // Only these may be run. No arbitrary flags from the browser.
 const ACTIONS = {
-  status:    { args: ["--checklist"],   label: "Check band status" },
-  diagnose:  { args: ["--extrareads"],  label: "Read diagnostics" },
-  activate1: { args: ["--autoimprint"], label: "Activate step 1" },
-  activate2: { args: ["--provision"],   label: "Activate step 2" },
-  settings:  { args: ["--getdesktop"],  label: "Read settings record" },
+  status:      { args: ["--checklist"],   label: "Check band status" },
+  diagnose:    { args: ["--extrareads"],  label: "Read diagnostics" },
+  activate1:   { args: ["--autoimprint"], label: "Activate step 1" },
+  activate2:   { args: ["--provision"],   label: "Activate step 2" },
+  settings:    { args: ["--getdesktop"],  label: "Read settings record" },
+  readprofile: { args: ["--readprofile"], label: "Read your details" },
+  setprofile:  { build: buildProfileArgs,  label: "Save your details" },
+  export:      { args: ["--export", "fuelband-export"], label: "Export activity" },
 };
 
-function runAction(key, res) {
+// The only action that takes user input. Every value is re-derived from a
+// number we parse ourselves — nothing the browser sends is passed through as a
+// string, so there is no way to smuggle an extra flag into the command line.
+function buildProfileArgs(q) {
+  const args = ["--setprofile"];
+  const num = (k, lo, hi) => {
+    const v = q.get(k);
+    if (v == null || v === "") return null;
+    const n = Number(v);
+    if (!Number.isFinite(n) || n < lo || n > hi) throw new Error(`${k} out of range`);
+    return n;
+  };
+
+  const kg = num("weightKg", 2, 300);
+  if (kg != null) args.push("--weight", `${kg.toFixed(1)}kg`);
+  const cm = num("heightCm", 50, 260);
+  if (cm != null) args.push("--height", `${cm.toFixed(1)}cm`);
+  const age = num("age", 5, 120);
+  if (age != null) args.push("--age", String(Math.round(age)));
+  const goal = num("goal", 0, 0xffffff);
+  if (goal != null) args.push("--goal", String(Math.round(goal)));
+
+  const g = q.get("gender");
+  if (g === "M" || g === "F") args.push("--gender", g);
+  for (const [k, flag] of [["metric", "--metric"], ["h24", "--24h"]]) {
+    const v = q.get(k);
+    if (v === "0" || v === "1") args.push(flag, v);
+  }
+  if (args.length === 1) throw new Error("nothing to set");
+  return args;
+}
+
+function runAction(key, res, query) {
   const action = ACTIONS[key];
   if (!action) { res.writeHead(400); return res.end("unknown action"); }
+
+  let argv;
+  try {
+    argv = action.build ? action.build(query) : action.args;
+  } catch (e) {
+    res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
+    return res.end(`Could not use those values: ${e.message}\n`);
+  }
 
   res.writeHead(200, {
     "Content-Type": "text/plain; charset=utf-8",
@@ -38,7 +81,7 @@ function runAction(key, res) {
     "X-Accel-Buffering": "no",
   });
 
-  const child = spawn(process.execPath, [TOOL, ...action.args], { cwd: path.join(DIR, "..") });
+  const child = spawn(process.execPath, [TOOL, ...argv], { cwd: path.join(DIR, "..") });
   child.stdout.on("data", (d) => res.write(d));
   child.stderr.on("data", (d) => res.write(d));
   child.on("error", (e) => { res.write(`\n[error] ${e.message}\n`); res.end(); });
@@ -57,7 +100,19 @@ const server = http.createServer((req, res) => {
     return res.end(html);
   }
   if (url.pathname === "/run") {
-    return runAction(url.searchParams.get("action"), res);
+    return runAction(url.searchParams.get("action"), res, url.searchParams);
+  }
+  // Hand back the two files --export just wrote. Fixed names only — the path is
+  // never built from anything the browser sends.
+  if (url.pathname === "/download") {
+    const which = url.searchParams.get("f") === "json" ? "json" : "csv";
+    const file = path.join(DIR, "..", `fuelband-export.${which}`);
+    if (!fs.existsSync(file)) { res.writeHead(404); return res.end("run the export first"); }
+    res.writeHead(200, {
+      "Content-Type": which === "json" ? "application/json" : "text/csv",
+      "Content-Disposition": `attachment; filename="fuelband-export.${which}"`,
+    });
+    return res.end(fs.readFileSync(file));
   }
   res.writeHead(404);
   res.end("not found");
