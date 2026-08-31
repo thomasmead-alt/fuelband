@@ -1794,6 +1794,53 @@ async function runStateTest(dev) {
   return false;
 }
 
+// Page a whole internal-memory bank out of the band.
+//
+// Reply framing (from completeReadMemoryInt): [01][len][0x07][status][tok:3][data]
+//   status 0x00 = this is the last block
+//   status 0x01 = more data follows; re-issue with the returned 3-byte token
+//   status 0x02 = bad status / bank unsupported
+// The token is the running offset, so the continuation read is
+//   [0x52, 0x37, bank, tok0, tok1, tok2]
+//
+// Banks 1/2 and 3/4 are A/B slot pairs with incrementing sequence counters
+// (wear-levelled dual-slot config). Bank 1/2 carries the serial; bank 3/4
+// carries settings including the daily goal. This is the firmware's OWN
+// persistent config — distinct from the host-facing DesktopOptions region we
+// write with 0x51 — and the most likely home of the imprint state.
+async function dumpBank(dev, bank, maxBlocks = 64) {
+  console.log(`\n=== DUMP INTERNAL BANK 0x${bank.toString(16).padStart(2, "0")} (0x52 / 0x37) ===`);
+  let tok = [0x00, 0x00, 0x00];
+  const all = [];
+  for (let i = 0; i < maxBlocks; i++) {
+    outWrite(dev, frameSys([0x52, 0x37, bank & 0xff, tok[0], tok[1], tok[2]]));
+    await delay(150);
+    let d = null;
+    for (const rid of [4, 3, 2, 1]) {
+      const r = tryRead(dev, rid);
+      if (!r.error && r.data && r.data.length > 4) {
+        const b = Array.prototype.slice.call(r.data, 0);
+        if (!d || b.length > d.length) d = b;
+      }
+    }
+    if (!d) { console.log(`  block ${i}: no reply — stopping`); break; }
+    const status = d[3];
+    const nextTok = [d[4], d[5], d[6]];
+    const data = d.slice(7);
+    const off = (nextTok[0] << 16) | (nextTok[1] << 8) | nextTok[2];
+    console.log(`  blk ${String(i).padStart(2)} status=${status} off=0x${off.toString(16)} : ${hex(data)}`);
+    all.push(...data);
+    if (status !== 0x01) { console.log(`  (status ${status} — end of bank)`); break; }
+    tok = nextTok;
+    if (off === 0) { console.log("  (token did not advance — stopping)"); break; }
+  }
+  console.log(`\n  total ${all.length} bytes`);
+  // ASCII rendering helps spot serials / names / flags
+  const ascii = all.map((b) => (b >= 0x20 && b < 0x7f) ? String.fromCharCode(b) : ".").join("");
+  console.log(`  ascii: ${ascii}`);
+  return all;
+}
+
 // Read the SYSTEM-RESERVED region (doReadSystemReserved, opcode 0xce).
 // Derived from the Mac plugin (fuelbandplugin.dylib, i386): the method does
 // submit(0xce, [N]) where N is the byte count to read, reply on the feature
@@ -2279,6 +2326,15 @@ async function dumpMemory(dev, maxBytes = 320) {
       await identity(dev);
       if (which === "refresh") await tokenTest(dev, 0x41);
       else await tokenTest(dev, 0x40);
+    } else if (process.argv.includes("--dumpbank")) {
+      const di = process.argv.indexOf("--dumpbank");
+      const bs = process.argv[di + 1];
+      await identity(dev);
+      if (bs === undefined || bs === "all") {
+        for (const b of [1, 2, 3, 4, 5, 6]) await dumpBank(dev, b);
+      } else {
+        await dumpBank(dev, parseInt(bs, 16));
+      }
     } else if (process.argv.includes("--runstatetest")) {
       await identity(dev);
       await runStateTest(dev);
