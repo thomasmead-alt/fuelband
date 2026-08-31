@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FuelBand Revival</title>
+<style>
+  :root {
+    --bg:#f7f7f8; --card:#fff; --ink:#1a1a1c; --muted:#6b6b73;
+    --line:#e3e3e8; --accent:#1f6feb; --ok:#12805c; --warn:#8a5a00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#16161a; --card:#1e1e24; --ink:#f0f0f2; --muted:#a0a0aa;
+            --line:#2e2e38; --accent:#5b9bff; --ok:#3fbf90; --warn:#e0a33a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+  .wrap { max-width: 780px; margin: 0 auto; padding: 32px 20px 64px; }
+  h1 { font-size: 1.6rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 28px; }
+  .card { background: var(--card); border: 1px solid var(--line);
+          border-radius: 12px; padding: 20px; margin-bottom: 18px; }
+  .card h2 { font-size: 1.05rem; margin: 0 0 6px; }
+  .card p { margin: 0 0 14px; color: var(--muted); font-size: 0.95rem; }
+  button { font: inherit; font-weight: 600; color: #fff; background: var(--accent);
+           border: 0; border-radius: 8px; padding: 11px 18px; cursor: pointer; }
+  button:hover:not(:disabled) { filter: brightness(1.08); }
+  button:disabled { opacity: .5; cursor: default; }
+  button.secondary { background: transparent; color: var(--accent);
+                     border: 1px solid var(--accent); }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .step { display:flex; gap:12px; align-items:flex-start; margin-bottom:14px; }
+  .num { flex:none; width:26px; height:26px; border-radius:50%; background:var(--accent);
+         color:#fff; font-size:.85rem; font-weight:700; display:grid; place-items:center; }
+  .banner { border-radius:10px; padding:14px 16px; margin-bottom:18px; font-size:.95rem; }
+  .banner.warn { background:rgba(224,163,58,.12); border:1px solid rgba(224,163,58,.4); color:var(--warn); }
+  .result { font-size:1.05rem; font-weight:600; margin:14px 0 0; }
+  .result.ok { color: var(--ok); }
+  .result.no { color: var(--warn); }
+  pre { background:#0d0d10; color:#d6d6de; border-radius:8px; padding:14px;
+        overflow-x:auto; font-size:12.5px; line-height:1.45; max-height:340px;
+        white-space:pre-wrap; word-break:break-word; margin:14px 0 0; }
+  details { margin-top: 10px; }
+  summary { cursor: pointer; color: var(--muted); font-size: .9rem; }
+  .hint { font-size:.85rem; color:var(--muted); margin-top:10px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>FuelBand Revival</h1>
+  <p class="sub">Bring an original Nike+ FuelBand back to life. Everything happens on
+  this computer — nothing is sent anywhere.</p>
+
+  <div class="banner warn">
+    <strong>Before you start:</strong> plug the band into this computer with its USB
+    cable. Leave the black window that launched this page open.
+  </div>
+
+  <div class="card">
+    <h2>1. Check the band</h2>
+    <p>Confirms the band is connected and tells you whether it's already activated.
+    This only reads — it changes nothing.</p>
+    <div class="row">
+      <button data-action="status">Check band</button>
+      <button class="secondary" data-action="diagnose">More detail</button>
+    </div>
+    <p id="verdict" class="result" hidden></p>
+  </div>
+
+  <div class="card">
+    <h2>2. Activate it</h2>
+    <p>Only needed if step 1 says the band is <em>not activated</em>. This writes
+    settings to the band. It takes about a minute, and the band will restart partway
+    through — that's expected.</p>
+    <div class="step"><div class="num">1</div><div>
+      <strong>Run step one</strong>, then wait until it says finished. The band
+      restarts during this step.
+    </div></div>
+    <div class="step"><div class="num">2</div><div>
+      <strong>Run step two</strong>, then press “Check band” again above.
+    </div></div>
+    <div class="row">
+      <button data-action="activate1">Activate — step 1</button>
+      <button data-action="activate2">Activate — step 2</button>
+    </div>
+    <p class="hint">If the band isn't found, unplug it, plug it back in, and try again.</p>
+  </div>
+
+  <div class="card">
+    <h2>Output</h2>
+    <p>The technical detail, in case you need it or want to share it when asking for help.</p>
+    <pre id="out">Ready. Plug in your band and press “Check band”.</pre>
+    <details>
+      <summary>Advanced</summary>
+      <div class="row" style="margin-top:10px">
+        <button class="secondary" data-action="settings">Read settings record</button>
+      </div>
+    </details>
+  </div>
+
+  <p class="hint">
+    Experimenting with hardware carries risk and there is no warranty. This project
+    is not affiliated with or endorsed by Nike.
+  </p>
+</div>
+
+<script>
+const out = document.getElementById("out");
+const verdict = document.getElementById("verdict");
+const buttons = [...document.querySelectorAll("button[data-action]")];
+
+function setBusy(b) { buttons.forEach((x) => x.disabled = b); }
+
+// Turn the raw tool output into one plain-English line.
+function interpret(text) {
+  // Setup problems first — these produce alarming stack traces.
+  if (/dlopen|Cannot find module|MODULE_NOT_FOUND|NODE_MODULE_VERSION/i.test(text))
+    return ["no", "Setup isn't finished. Close this window and the black window, " +
+                  "then double-click the Start file again — it will install what's needed."];
+  if (/permission denied|EACCES|cannot open device/i.test(text))
+    return ["no", "The computer wouldn't let the app open the band. On Linux this " +
+                  "usually needs extra permissions; on a Mac, try a different USB port."];
+  if (/no fuelband found|could not open|device not found/i.test(text))
+    return ["no", "Band not found — check the cable, then unplug and replug it."];
+  // Read the imprinted flag from the checklist line specifically.
+  const m = text.match(/imprinted\s*=\s*([01])/);
+  if (m) return m[1] === "1"
+    ? ["ok", "This band is activated and ready to use."]
+    : ["no", "This band is not activated yet — go to step 2 below."];
+  if (/IMPRINTED/.test(text)) return ["ok", "This band is activated and ready to use."];
+  return [null, null];
+}
+
+async function run(action) {
+  setBusy(true);
+  verdict.hidden = true;
+  out.textContent = "Working… (this can take a minute; don't unplug the band)\n\n";
+  try {
+    const res = await fetch(`/run?action=${encodeURIComponent(action)}`);
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let all = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = dec.decode(value, { stream: true });
+      all += chunk;
+      out.textContent += chunk;
+      out.scrollTop = out.scrollHeight;
+    }
+    const [kind, msg] = interpret(all);
+    if (msg) {
+      verdict.textContent = msg;
+      verdict.className = "result " + kind;
+      verdict.hidden = false;
+    }
+  } catch (e) {
+    out.textContent += `\n[error] ${e.message}\n`;
+  } finally {
+    setBusy(false);
+  }
+}
+
+buttons.forEach((b) => b.addEventListener("click", () => run(b.dataset.action)));
+</script>
+</body>
+</html>
