@@ -95,7 +95,10 @@ node fuelband-dump.js --token               # access-token write (0x40), never s
 
 ---
 
-## Step 3 — The fake-server route (old Intel Mac)
+## Step 3 — The fake-server route (NOT REQUIRED)
+
+> Activation does not need this. Both bands were activated with Steps 1–2 alone.
+> Kept only as reference for the retired web API.
 
 The strongest remaining play: let Nike's **own** app do the imprint, against a
 server we control. Needs a pre-Catalina Intel Mac, because Nike+ Connect is a

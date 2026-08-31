@@ -1,3 +1,15 @@
+> **NOT REQUIRED — kept for reference only.**
+>
+> Activation does **not** need any of this. Both of our bands were activated
+> using `fuelband-dump.js` over USB alone: no Nike+ Connect, no fake server, no
+> DNS changes, no certificates, no patched binary. See
+> [`../RUNBOOK.md`](../RUNBOOK.md).
+>
+> This directory documents the retired web API and a local stand-in for it. It is
+> kept because the reverse-engineering findings are worth recording, and because
+> it may help anyone building a companion service for syncing. It is not part of
+> the activation path, and you should not need to patch any binary.
+
 # Imprinting via a fake Nike server (old Intel Mac)
 
 Goal: run the **real** Nike+ Connect desktop app against a Nike API **we

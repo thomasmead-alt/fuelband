@@ -18,7 +18,8 @@ prompt, and waits for software that no longer exists. This project:
 - **Talks to the band over USB** — identity, firmware, battery, status, settings.
 - **Writes settings** — clock, daily goal, profile, display options.
 - **Activates a blank band** ("imprinting"), which previously required Nike's
-  now-dead servers.
+  now-dead servers. **No servers or Nike software are involved** — the script
+  talks to the band directly over USB.
 - **Documents the protocol** so others don't have to redo the work.
 
 ## Requirements
@@ -57,7 +58,7 @@ node fuelband-dump.js --checklist     # imprinted = 1
 | [`tools/PROTOCOL.md`](tools/PROTOCOL.md) | The USB wire protocol, settings-record format, activation findings |
 | [`tools/NIKE-CONNECT-ARCHITECTURE.md`](tools/NIKE-CONNECT-ARCHITECTURE.md) | How the original desktop software is built |
 | [`tools/RUNBOOK.md`](tools/RUNBOOK.md) | Ordered, copy-pasteable commands |
-| [`tools/mitm/`](tools/mitm/) | A local stand-in for the retired web service, for use with your own copy of the original app |
+| [`tools/mitm/`](tools/mitm/) | *Not required for activation.* Reference notes on the retired web API |
 
 ## ⚠️ Safety
 

@@ -1,116 +1,150 @@
-# Reviving the Nike+ FuelBand: the USB *write* protocol, and the wrapper byte everyone missed
+# Activating a dead Nike+ FuelBand (gen 1) offline — no servers, no Nike software
 
-Nike shut down the Nike+ services and Nike+ Connect on 30 April 2018. A
-first-generation FuelBand that was never set up is now a paperweight: it boots to
-a "connect to USB" prompt and waits for software that no longer exists.
+Nike shut down Nike+ services and Nike+ Connect on **30 April 2018**. A
+first-generation FuelBand that was never set up has been a paperweight ever
+since: it powers on, shows a USB prompt, and waits for software that no longer
+exists.
 
-I've been reverse-engineering the USB protocol from Nike's own `FuelBandPlugin.dll`
-(the installer is an NSIS archive of native DLLs, and the DLL still carries its
-C++ source filenames and log format strings — `FuelBandCommands.cc`,
-`DesktopOptions.cc`), verified against two physical bands.
+**It can now be activated over USB with a single Node script.** No Nike servers,
+no Nike+ Connect, no fake server, no certificates. Reproduced on two different
+bands (`20M9FC5V01660`, `20M9FC6H01976`), both on firmware **F2.12**, and the
+activation survives a power cycle.
 
-## Prior art
+As far as I can find, this hadn't been done publicly. Every prior project stops
+short of activation — one archived library's own README says it *"never really
+made it anywhere in terms of getting info off the fuelband,"* and a 2024 project
+has the gen-1 setup function present but left as an empty stub.
 
-- **rbrune/fuelband-usb** — Python, reads status/serial/firmware/logs over USB HID.
-  Explicitly notes activity data readout is unsupported.
-- **openyou/libfuelband** — archived 2018. The author's own summary: *"This library
-  never really made it anywhere in terms of getting info off the fuelband."*
-- **evilsocket** — reversed the FuelBand **SE**'s BLE protocol, and found that an
-  all-`FF` auth token works.
+---
 
-So publicly: some reads on gen-1 over USB, nothing that writes, and a separate
-BLE story for the SE.
+## The thing that blocked everyone: the `0x07` wrapper
 
-## What's new
-
-**1. The `0x07` command wrapper.** This is the whole ballgame. Commands aren't
-sent bare — they're wrapped:
+Commands aren't sent bare. Each one is wrapped:
 
 ```
-body  = [len+1, 0x07, <opcode>, <payload…>]   as an OUTPUT report, size-bucketed
-reply = feature report 1 -> [01, len, 0x07, …]
+out:    [len+1, 0x07, <opcode>, <payload…>]     size-bucketed output report
+reply:  feature report 1 -> [01, len, 0x07, …]
 ```
 
-Send an opcode without it and you get `01 01 <opcode>` — an empty body. Nike's own
-code calls that *"operation not recognized by firmware"*, which is exactly why
-it's so misleading: **it usually means you addressed the device wrong, not that
-the command is missing.** I burned a long time concluding this firmware "didn't
-implement" commands it implements perfectly well.
+Send an opcode without it and you get back `01 01 <opcode>` — an empty body.
+Nike's own code calls that *"operation not recognized by firmware."* **It's a
+trap: it almost always means you framed the request wrongly, not that the command
+is missing.** I spent days concluding this firmware "didn't implement" commands
+it implements perfectly well.
 
-**2. Writes work.** Verified byte-exact by reading each value back:
+## The settings record
 
-| command | opcode | payload |
+Persistent settings live in one CRC-checked record ("DesktopOptions"), written
+with `0x51` (chunked) and read with `0x50`.
+
+```
+[total length: 4 bytes BIG-ENDIAN]
+[DIN: 48][UDI: 48][deviceGroupConfigId: 48]      NUL-padded, no length prefix
+[TLVs …]
+[CRC-16/XMODEM: 2 bytes]
+```
+
+TLVs are `[tag u16 BE][len u8][value]`:
+
+| tag | field | type |
 |---|---|---|
-| clock | `0x21` | `[unix:4 BE][gmtOffset:4 BE][dstMinutes:1]` |
-| goal | `0x25` | `[type:1][goal:3 BE]` |
-| 24-hour | `0x31` | `[bool:1]` |
+| `0x01` / `0x02` | metric weight / height | bool, len **1** |
+| `0x05` / `0x06` / `0x07` | email / birthdate / screen name | string |
+| `0x0b` | **imprint_state** | u32 BE, len **4** |
+| `0x0c` / `0x0f` | first name / band name | string |
+| `0x0d` | profile_update_date | i64 BE, len **8** |
+| `0x0e` | clock auto set | bool, len 1 |
 
-A band whose factory clock read Jan 2000 is now keeping real time — confirmed by
-reading it back 274 seconds later and seeing it advance.
+Chunked write, each chunk as the body of `0x51`:
+```
+[83 a2][flag][off>>16][off>>8][off&0xff][data … ≤53 bytes]
+```
+`flag` = 0 first / 1 continuation / 2 final. The offset counts **data bytes
+only** — the `83 a2` prefix repeats in every chunk. There is **no begin, no
+commit, and no flush**; the sequence just ends with a read-back.
 
-**3. The chunked config transfer**, reconstructed from `0x100386f0` and confirmed
-against hardware. Each chunk, as the body of opcode `0x51`:
+## The two things I got wrong for weeks
+
+Both are worth stating, because either one alone silently breaks everything.
+
+**1. String TLVs need a length byte.** I was writing `[tag][bytes][NUL]` instead
+of `[tag][len][bytes]`. The parser reads the byte after the tag as a length — so
+it took the *first character of the string* as the length and desynchronised from
+tag `0x05` onward. Tags `0x06, 0x07, 0x0c, 0x0f, 0x0d` were never parsed at all.
+The record still round-tripped perfectly (correct length header, valid CRC),
+which is exactly why it took so long to spot.
+
+Also: a known tag with the **wrong length is silently skipped**, not rejected. I
+sent `0x01`/`0x02` as u32 instead of bools for months and got no complaint.
+
+**2. `imprint_state` is a 0–100 progress scale, not a small enum.** The real
+values:
 
 ```
-[83 a2] [flag] [off>>16] [off>>8] [off&0xff] [data …]
+0 Fresh · 3 TimeSet · 5 DinGenerated · 10 SetupComplete
+20 InFirstCharge · 30 FirstChargeComplete · 100 Complete
 ```
 
-`flag` = 0 first / 1 continuation / 2 final (the rewrite to 2 is guarded, so a
-single-chunk transfer stays 0). Data budget `0x3c - 6 - 1` = **53 bytes**. All
-transfer state is host-side — no BEGIN, no handshake, no finalize. The band acks
-each chunk with the running offset: `01 05 07 00 <offset:3>`.
+I'd been writing 1, 2, 3 — all of which land in the firmware's explicit
+*"below 20, do nothing"* branch. Every completion check in the desktop app
+compares against **100**.
 
-**4. The config blob format.**
+## What actually activates a band
 
-```
-[total length: 4 bytes BIG-ENDIAN] [payload] [CRC-16: 2 bytes]
-```
-
-Those leading four bytes are a length, not padding — a zero header fails the
-parser's `len >= 6` check and the blob is silently discarded. CRC is
-**CRC-16/XMODEM** (poly `0x1021`, init `0`), table at `0x1005c700`, verified
-against the canonical `"123456789"` → `0x31c3`.
-
-**5. Corrections to things that were wrong.** The opcode table you'd get by
-pairing handlers in the registration function is *misaligned* — `time` is `0x21`,
-not `0x31` (`0x31` is 24-hour mode). Battery voltage is big-endian (`10 5e` =
-4190 mV; little-endian gives ~24 V). The version string is
-`sprintf("%c%u.%u", r[0], r[2], r[1])` — major and minor are transposed relative
-to the obvious reading, so `46 0c 02` is `F2.12`.
-
-**6. From the Android APK — why the all-`FF` token works.** The `DIN` is a
-server-issued **UUID**, stored per-serial, and it *is* the BLE auth key:
-
-```java
-key = MD5( DIN_as_16_bytes  XOR  b37ebf75c6c71924a3b1884a29704435 )
+```sh
+node fuelband-dump.js --autoimprint   # corrected record + access token + reboot
+node fuelband-dump.js --provision     # goal, metric, gender, 24h, age, clock
+node fuelband-dump.js --checklist     # imprinted = 1
 ```
 
-When no DIN is known the app falls back to sixteen `0xFF` bytes and logs
-`Using legacy auth token`. So the published all-`FF` result isn't a flaw found
-from outside — it's Nike's own no-DIN fallback path. (Also: the mobile client
-*cannot* write desktop data at all — `Cmd_DesktopData.encode()` throws
-`"desktop data functionality is not supported"`.)
+Status `0xdf` byte 0 bit 0 is the imprinted flag:
+```
+band 1:  c8 -> cf     band 2:  80 -> c0 -> c7
+```
+`mode` also advances 0 → 3. Both survived a reboot, so it's persisted in flash.
 
-## What's still blocked
+The requirement appears to be **a correctly-formed settings record plus a written
+access token plus a configured profile** — not one magic command. I have not
+isolated a single decisive opcode, and I'd rather say that than guess.
 
-Activation. The band stays un-imprinted (status `0xdf`, bit 0) no matter what we
-write. The config blob's first three fields are `DIN`, `UDI` and
-`device group config id` — 48 bytes each, all **Nike account-issued**. Writing a
-well-formed blob with empty identifiers commits to the region but doesn't flip the
-bit. `doRunState` (`0x28`) is rejected even with the payload derived exactly from
-the DLL. It's possible no fabricated blob will ever satisfy the firmware.
+## Things I proved wrong along the way
 
-## ⚠️ Warning: don't sweep unknown opcodes
+- **The corrected record alone is not enough.** Writing it to a pristine band
+  landed cleanly and did nothing.
+- **run-state isn't involved.** `[0x28, f1, 29, state]` is rejected on both bands,
+  and one activated anyway. My marker payload is evidently wrong.
+- **`goalSet` isn't a precondition.** The second band activated with it still 0.
+- **The DIN doesn't need to be real.** It's a server-issued UUID, but the firmware
+  treats it as an opaque string — there's no checksum, no signature, and **no
+  cryptography anywhere in the gen-1 plugin**. A fabricated identity is accepted.
+- **The band's own timestamps stay zero** (device-init, assessment-start) even
+  after activation — so the "assessment" state machine isn't a gate either.
 
-I ran a blind opcode sweep and **bricked a band with `0x14`**. It doesn't appear
-anywhere in Nike's DLL. The write itself timed out mid-transaction, the display
-died, the button stopped responding and it no longer enumerates — consistent with
-`latchup` ("turn off battery", which is in Nike's command list). It was at 100%
-charge at the time. Latchup is a shipping mode and is meant to be exited by USB
-power, so it may yet come back, but don't repeat my mistake: `0x13` is `battery`,
-and whatever sits next to it is not worth finding out by hand.
+## Corrections to earlier public work
 
-Full protocol notes, an annotated disassembly of the transfer routine, and a
-`node-hid` tool are in the repo. Corrections very welcome — particularly from
-anyone with a **provisioned** band, since a single `0xdf` status dump and a config
-region read from a working unit would answer the activation question outright.
+- The opcode table you'd get by pairing handlers in the registration function is
+  **misaligned** — `time` is `0x21`, not `0x31` (`0x31` is 24-hour mode).
+- Battery voltage is **big-endian** (`10 5e` = 4190 mV; little-endian gives ~24 V).
+- The version string is `sprintf("%c%u.%u", r[0], r[2], r[1])` — major and minor
+  are transposed, so `46 0c 02` is `F2.12`.
+- `0x1c` is **eeprom-erase**, not restoreDefaults (which is a separate
+  fire-and-forget `0x02`). Worth knowing before you sweep anything.
+
+## ⚠️ Don't sweep unknown opcodes
+
+I bricked a band with `0x14` during a blind sweep — display dead, button
+unresponsive, no longer enumerating, at 100% charge. It came back after a long
+spell on the charger (that class of command is a shipping mode meant to be exited
+by USB power), but there was no guarantee. Stick to commands you can name.
+
+Also avoid: `latchup` (disconnects the battery), `restoreDefaults`,
+`eeprom-erase`, `bootblock`, and the firmware-flash family.
+
+## Repo
+
+Tools, full protocol notes, and an architecture write-up of the original desktop
+software are on GitHub. No Nike binaries, firmware, or credentials are included —
+you don't need any of them; the script talks to the band directly.
+
+Corrections welcome. I'd still love a status + settings dump from a band that was
+activated back when the servers were running, purely as a reference.

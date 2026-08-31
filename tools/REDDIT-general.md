@@ -1,78 +1,77 @@
-# I got a dead Nike+ FuelBand talking again — and found the one byte that everyone was missing
+# I brought a dead Nike+ FuelBand back to life — 8 years after Nike switched off the servers
 
-If you've got a Nike+ FuelBand in a drawer, it's probably a paperweight. Nike
-switched off the Nike+ services in April 2018, along with the "Nike+ Connect"
-desktop software the band needed. A band that was never set up is stuck: it powers
-on, shows a little USB symbol, and waits forever for software that no longer
-exists.
+If you've got an original Nike+ FuelBand in a drawer, it's probably a paperweight.
+Nike shut down the Nike+ services in April 2018, along with the "Nike+ Connect"
+desktop software the band needed to be set up. A band that was never activated is
+stuck forever: it powers on, shows a little USB symbol, and waits for software
+that no longer exists.
 
-I had two, both brand new in the box, and wanted to see how far they could be
-brought back.
+I had two, both brand new in the box. **Both are now working.**
 
-## The approach
+## What was actually wrong
 
-The old Nike+ Connect installer is still floating around, so I pulled it apart and
+The band won't do anything until it's been "activated" — a one-time setup that
+originally required Nike's servers to hand it an ID. Those servers are gone, so
+the conventional wisdom was that an unactivated band could never be revived.
+
+That turns out not to be true. The band doesn't check with anyone. It just needs
+to be told the right things, in the right format, over USB.
+
+## How it went
+
+The old Nike+ Connect installer is still floating around, so I took it apart and
 worked backwards through the code that used to talk to the band. Handily, Nike
-shipped it with a lot of internal debug text left in, which makes it much easier
-to follow than a typical black box.
+left a lot of internal debug text in it, which makes it far easier to follow than
+a typical black box.
 
-Then it was a matter of trying to speak the same language to a real band over USB.
+Then it was a matter of learning to speak the same language to a real band.
 
-## The thing that was blocking everyone
+**The first wall** was that the band appeared to reject almost everything. It
+turned out commands have to be wrapped in a small envelope — one extra marker
+byte in front. Miss it and the band replies with something that looks exactly
+like *"I don't support that."* It's a perfect trap: it doesn't mean the feature is
+missing, it means you knocked on the wrong door.
 
-For a long stretch I could *read* from the band — serial number, firmware, battery,
-that sort of thing — but every attempt to change anything got a polite "command not
-recognised" style response back. Existing hobbyist projects hit the same wall; one
-of them is archived on GitHub with the author's own note that it *"never really
-made it anywhere in terms of getting info off the fuelband."*
+**The second wall** was subtler, and entirely my own fault. I was writing the
+band's settings record in a format that was *almost* right — I'd left out a
+single length marker in front of each piece of text. The band stored it happily,
+handed it back perfectly, and the checksum passed. But internally it was reading
+one character of a name as a "how long is this?" number, and everything after
+that point turned to noise. Weeks of "the data is clearly fine, why won't this
+work" had a one-byte answer.
 
-It turned out the band doesn't accept commands on their own. Each one has to be
-wrapped in a small envelope first — literally one extra marker byte in front. Miss
-it and the band replies with what looks exactly like "I don't support that," which
-is why it's such a good trap. It doesn't mean the feature is missing. It means you
-knocked on the wrong door.
+**The third** was that I'd misread a number. A field I'd assumed was a simple
+on/off setting is actually a **progress percentage, 0 to 100.** I'd been writing
+1, 2 and 3 — all of which the band reads as *"setup is barely started, ignore
+this."* The value it wants is 100.
 
-Once that was sorted, things that had failed for days started working immediately.
+Fix all three and it activates.
 
-## What works now
+## Where it stands
 
-- **Setting the clock.** One band's factory clock read January 2000. It now keeps
-  real time — I set it, waited, read it back, and it had ticked forward correctly.
-- **Setting the daily fuel goal and 12/24-hour display.** Both stick.
-- **Writing to the band's configuration storage**, and reading it back byte for
-  byte to prove it landed.
+Both bands are activated, and it survives being unplugged and rebooted — so it's
+written into the band permanently, not a temporary trick. The second band proved
+it wasn't a fluke.
 
-Plus a pile of smaller corrections — the battery voltage and firmware version were
-being decoded wrongly by earlier work, which is why you'd see nonsense like a
-30-volt battery.
+It needs **nothing but a small script and a USB cable.** No Nike software, no
+servers, no accounts, no internet.
 
-## What's still stuck
+## A warning, because I learned it the hard way
 
-Activation. The band won't fully "wake up" and start tracking until it's been
-registered, and registration needs an ID that only Nike's servers ever handed out.
-I can write a perfectly well-formed registration record, and the band accepts and
-stores it — but it still doesn't consider itself activated. That may simply not be
-solvable without the original servers.
+Don't go poking at commands you can't identify. Early on I ran a scan across
+unknown command numbers and **killed one of the two bands** — screen dead, button
+unresponsive, computer couldn't see it at all, and it was fully charged at the
+time. I'd hit something like an internal "disconnect the battery" instruction.
 
-So: a band that keeps time and holds settings, but not yet a working fitness
-tracker.
+It did eventually come back after a long spell on the charger. But for a couple of
+days I thought I'd destroyed it, and I got lucky. If you experiment with your own,
+stick to commands you can actually name.
 
-## A warning, since I learned it the hard way
+## If you've got one
 
-Don't go poking at commands you can't identify. I ran a scan across unknown
-command numbers and **killed one of the two bands** — screen dead, button does
-nothing, computer no longer sees it at all. It was fully charged at the time. My
-best guess is I hit an internal "disconnect the battery" command, which is
-recoverable in principle by leaving it on a charger, but it hasn't come back yet.
+The tools and full technical notes are on GitHub. It's free, there's no Nike
+software involved, and it doesn't touch any Nike service — those are long gone.
+It's just a way for people to use hardware they already own.
 
-If you're experimenting with your own, stick to commands you can actually name.
-
-## If you can help
-
-The single most useful thing right now would be a couple of readings from a
-FuelBand that **was** set up back in the day. That would show exactly what an
-activated band looks like internally, and would likely answer the last question
-outright.
-
-Notes, tooling and full technical write-up are on GitHub — corrections very
-welcome.
+Corrections very welcome, especially from anyone who still has a FuelBand that
+*was* set up back in the day — a reading from one would be a useful reference.
