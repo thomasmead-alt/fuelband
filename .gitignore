@@ -1,5 +1,27 @@
+# Never commit vendor binaries or anything derived from them.
+# You must supply your own copy of Nike+ Connect; none is distributed here.
+*.exe
+*.dll
+*.dylib
+*.dmg
+*.pkg
+*.apk
+*.hfs
+*.bin
+*.hex
+*.img
+*.patched
 
-Nike+Connect_Installer.exe
-nike-fuelband.apk
-4.1.2.42.exe
-5.3.8.37.exe
+# Local captures, dumps and generated certs
+*.pem
+*.crt
+*.key
+mitm-log.txt
+tools/fuelband-dump.bin
+*-dump.txt
+*-banks.txt
+*-ddb.txt
+*-status.txt
+
+node_modules/
+.DS_Store
