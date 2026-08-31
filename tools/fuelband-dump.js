@@ -25,6 +25,9 @@ try {
   process.exit(1);
 }
 
+// Commands that legitimately accept --reset as a MODIFIER; the bare --reset
+// branch must not shadow them (it used to, silently skipping the write).
+const RESET_MODIFIER_CMDS = ["--canonical", "--fullimprint", "--autoimprint", "--provision"];
 const VID = 0x11ac;
 const PID = 0x6565;
 
@@ -2405,7 +2408,7 @@ async function dumpMemory(dev, maxBytes = 320) {
     } else if (process.argv.includes("--extrareads")) {
       await identity(dev);
       await extraReads(dev);
-    } else if (process.argv.includes("--reset")) {
+    } else if (process.argv.includes("--reset") && !RESET_MODIFIER_CMDS.some((f) => process.argv.includes(f))) {
       await identity(dev);
       await sendDeviceReset(dev);
     } else if (process.argv.includes("--checklist")) {
