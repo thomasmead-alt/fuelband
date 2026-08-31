@@ -1,103 +1,112 @@
-# Fuelband
+# FuelBand Revival
 
-A daily activity tracker inspired by the classic fuel-point fitness bands.
-Log activities, earn **fuel points** toward a daily goal, and keep a streak
-alive — all in a single dependency-free web app.
+Tools and protocol documentation for the **first-generation Nike+ FuelBand**
+(USB `11ac:6565`), so owners can keep using hardware they already own after the
+manufacturer's services shut down in April 2018.
 
-## Features
+**Status: a factory-blank band can be activated over USB, with no servers.**
+Reproduced on two different bands. As far as we can find, this hadn't been done
+publicly before — every prior project stopped short of activation.
 
-- **Fuel ring** — today's fuel vs. your daily goal, with an animated progress ring
-- **Activity logging** — walking, running, cycling, swimming, gym, yoga, team
-  sports, and dancing, with light/moderate/intense intensity levels
-- **MET-based scoring** — fuel points, calories, and step estimates are derived
-  from each activity's metabolic equivalent (MET) and duration
-- **Daily stats** — steps, calories, active minutes, and goal streak
-- **Weekly chart** — the last 7 days of fuel with a goal line, hover tooltips,
-  and an accessible table view
-- **Editable goal** — set your own daily fuel target
-- **USB device connection** — plug in a first-generation Nike+ FuelBand and
-  read its model, serial, firmware, battery, and status over WebHID
-- **Local-only data** — everything persists in `localStorage`; nothing leaves
-  the device
+---
 
-## Running it
+## What this does
 
-No build step and no dependencies — it's plain HTML/CSS/JS:
+A gen-1 FuelBand that was never set up is inert: it powers on, shows a USB
+prompt, and waits for software that no longer exists. This project:
+
+- **Talks to the band over USB** — identity, firmware, battery, status, settings.
+- **Writes settings** — clock, daily goal, profile, display options.
+- **Activates a blank band** ("imprinting"), which previously required Nike's
+  now-dead servers.
+- **Documents the protocol** so others don't have to redo the work.
+
+## Requirements
+
+- Node.js
+- A gen-1 Nike+ FuelBand and a USB cable
+- macOS or Linux (on Linux you may need a udev rule for `11ac:6565`, or `sudo`)
+
+> The browser can't do this: WebHID only permits transfers on report IDs the
+> descriptor declares — here just one that won't read — so a native HID library
+> is required.
+
+## Quick start
 
 ```sh
-# any static server works, e.g.
-python3 -m http.server 8000
-# then open http://localhost:8000
+cd tools
+npm install
+
+node fuelband-dump.js --checklist     # read status, decode the imprinted bit
+node fuelband-dump.js --extrareads    # timestamps, assessment metrics, fault log
 ```
 
-Or just open `index.html` directly in a browser.
+To activate a blank band, see **[`tools/RUNBOOK.md`](tools/RUNBOOK.md)**. The
+short version:
 
-## How fuel is calculated
-
+```sh
+node fuelband-dump.js --autoimprint   # corrected settings record + token + reboot
+node fuelband-dump.js --provision     # profile: goal, metric, gender, 24h, clock
+node fuelband-dump.js --checklist     # imprinted = 1
 ```
-fuel     = METs × intensity factor × minutes × 4
-calories = METs × intensity factor × 3.5 × 70 kg / 200 × minutes
-```
 
-Intensity factors: light 0.75 · moderate 1.0 · intense 1.3.
+## Documentation
 
-## Connecting a real FuelBand (USB)
+| File | What's in it |
+|---|---|
+| [`tools/PROTOCOL.md`](tools/PROTOCOL.md) | The USB wire protocol, settings-record format, activation findings |
+| [`tools/NIKE-CONNECT-ARCHITECTURE.md`](tools/NIKE-CONNECT-ARCHITECTURE.md) | How the original desktop software is built |
+| [`tools/RUNBOOK.md`](tools/RUNBOOK.md) | Ordered, copy-pasteable commands |
+| [`tools/mitm/`](tools/mitm/) | A local stand-in for the retired web service, for use with your own copy of the original app |
 
-The **Device** card connects to a first-generation Nike+ FuelBand
-(vendor `0x11ac`, product `0x6565`) plugged in over USB, using the
-community reverse-engineered HID feature-report protocol from
-[rbrune/fuelband-usb](https://github.com/rbrune/fuelband-usb). It reads
-model, serial number, firmware version, hardware revision, battery level
-and charging state, status flags, and setup/reset timestamps.
+## ⚠️ Safety
 
-Requirements and limits:
+**Some commands can brick your band.** We bricked one during this work (it
+recovered after a long charge, but there was no guarantee). Specifically, do not
+send:
 
-- **WebHID** — Chrome or Edge on desktop, served over https or `localhost`
-  (the button explains itself if either is missing).
-- **Linux** needs a udev rule so the browser can open the hidraw node, e.g.
-  `SUBSYSTEM=="hidraw", ATTRS{idVendor}=="11ac", MODE="0666"` in
-  `/etc/udev/rules.d/99-fuelband.rules`.
-- **No turnkey activity sync (yet).** Nike shut down the FuelBand services in
-  2018, and the part of the USB protocol that carries fuel/step data was never
-  reverse-engineered — existing tools only decode device status. The **decode
-  lab** below is the path to changing that.
+- `latchup` — disconnects the battery
+- `restoreDefaults` — factory wipe
+- `eeprom-erase` — erases the sample store
+- `bootblock` / firmware-flash commands
+- blind opcode sweeps against unknown commands
 
-### Decode lab (original band)
+The tool deliberately does not expose these as convenience flags. Everything in
+the runbook is either read-only or a command the original software itself sent.
 
-The transport matches the band's real HID descriptor (confirmed against
-hardware): commands are sent on size-bucketed **output** reports (IDs
-9/10/11/12 for 7/15/31/63-byte payloads) framed as `[length, …command]`, and
-replies arrive as **input** reports (IDs 1/2/3/4) via the `inputreport` event.
-This mirrors the [libfuelband](https://github.com/openyou/libfuelband)
-reference — e.g. the memory read is output report `0x0a` with body
-`07 bb 50 37 36 00 00 00`.
+There is no warranty. You are experimenting on your own hardware at your own
+risk. Start with the read-only commands.
 
-Once connected you get:
+## Scope and legal notes
 
-- A **probe** panel that fires candidate commands and shows the raw replies.
-- A **raw command tester** — type command bytes in hex (or use the presets)
-  and see the exact reply (report id + bytes + ASCII). This is how opcodes and
-  response framing get confirmed.
-- **Read data dump**, which issues the memory-read command iteratively and
-  captures the raw chunks plus a best-effort payload.
-- **Read log** (`0xf6 0x00`) for the band's ASCII system log.
-- **Diagnostics**, which prints the band's report layout.
+*Not legal advice — this is a description of what this project does and doesn't
+contain. If it matters to you, talk to a lawyer.*
 
-To locate the fuel field, read a number off the band's own display (fuel,
-steps, or calories) and type it into **"Value shown on the band."** The lab
-scans the captured bytes for that number encoded little-endian as a 2-, 3-, or
-4-byte word and reports the offset and width of any match. Repeat as the number
-changes to confirm the field. That offset is the missing piece the original
-reverse-engineers never nailed down — and it needs a physical band to find.
+- **No Nike software is distributed here.** No binaries, installers, firmware
+  images, or extracted resources. If a workflow needs the original application,
+  you supply your own copy.
+- **This is interoperability work.** The purpose is to let owners keep using
+  hardware they bought, after the vendor discontinued the service it depended
+  on. Protocol details are *facts about an interface*, documented in prose.
+- **No copy protection is circumvented.** There is none to circumvent: the
+  device firmware implements no authentication, encryption, or access control on
+  the USB interface.
+- **No credentials are published.** API keys and similar values found while
+  analysing the original software are deliberately not reproduced.
+- **No verbatim disassembly** of third-party binaries is included.
+- **Not affiliated with, endorsed by, or connected to Nike, Inc.** "Nike",
+  "Nike+" and "FuelBand" are trademarks of their respective owner and are used
+  here only to identify the hardware this software interoperates with.
+- The services this replaces were **retired by the vendor in April 2018**. This
+  project does not interact with, bypass, or impersonate any live service.
 
-> Tip: if the band shows a **USB/battery icon**, its battery is too low to run.
-> Charge it fully over USB before dumping, or you'll get empty/garbage data.
+Our code is MIT licensed — see [`LICENSE`](LICENSE).
 
-## Project layout
+## Contributing
 
-| File | Purpose |
-|------|---------|
-| `index.html` | App shell and layout |
-| `styles.css` | Dark, LED-inspired theme |
-| `app.js` | State, fuel math, rendering, and the weekly SVG chart |
-| `fuelband-usb.js` | WebHID connection to a first-gen FuelBand |
+Corrections very welcome, especially from anyone with a band that was activated
+back when the servers were running — a status and settings-record dump from one
+would still be a useful reference.
+
+Please don't open pull requests containing vendor binaries, extracted resources,
+firmware images, or credentials; they won't be merged.
