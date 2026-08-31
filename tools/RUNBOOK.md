@@ -21,9 +21,9 @@ output; between them they probe every surface we know about.
 node fuelband-dump.js --extrareads
 ```
 Reads run-state, both timestamps, assessment-metrics and the fault log.
-**Watch for:** `ts assessment-start`. If it reads all zeros, the band has never
-started its assessment — a named precondition we have never satisfied, and the
-best current explanation for why activation doesn't take.
+Both timestamps read zero on a blank band — and, as it turns out, **they stay
+zero even after a successful activation**, so they are not a precondition. Useful
+as a baseline; not a blocker.
 
 ```sh
 node fuelband-dump.js --sysreserved
@@ -37,8 +37,8 @@ mistake, so no valid field has ever actually been read.
 node fuelband-dump.js --membanks
 ```
 Sweeps internal flash banks 0–15. Nike's own software only ever reads bank
-`0x06` (the fault log), so every other partition is unexplored — and the
-imprint flag has to live in one of them.
+`0x06` (the fault log). Banks 1–4 are A/B slot pairs holding the firmware's own
+config (serial, goal) with incrementing sequence counters; 7–15 are unsupported.
 **Watch for:** `<DATA>` on any bank other than `0x06`.
 
 ```sh
@@ -63,19 +63,27 @@ This writes to the band. It's recoverable (the hardware reset is hold-button ~10
 and every command it sends is one Nike's own software sends.
 
 ```sh
-node fuelband-dump.js --autoimprint
+node fuelband-dump.js --autoimprint     # corrected record + access token + reboot
+node fuelband-dump.js --provision       # profile: goal, metric, gender, 24h, age, clock
+node fuelband-dump.js --checklist       # imprinted = 1
 ```
 
-Runs the corrected sequence and then power-cycles and re-checks in one go:
+**Both commands are needed.** `--autoimprint` alone took a pristine band from
+`0x80` to `0xc0`; `--provision` completed it to `0xc7` (imprinted). The
+requirement appears to be a correctly-formed record **plus** a written access
+token **plus** a configured profile — not one magic command.
+
+`--autoimprint` runs the corrected sequence, then power-cycles and re-checks:
 run-state `0x12` → both timestamp reads → the full `DesktopOptions` record with
 `imprint_state = 100` → option-age → read-back → clock → reboot → re-read status.
 
 **Watch for:** `*** IMPRINTED ***`, or the final `imprinted` line in the checklist.
 
-This is the first attempt where five separate things are simultaneously correct —
-the string TLV length bytes, `imprint_state = 100` (previous values sat in the
-firmware's "do nothing" branch), the bool tags, the `clock auto set` tag, and the
-run-state ordering. Everything before this was writing a malformed record.
+What makes this work, where earlier attempts didn't: the string TLVs carry their
+length byte, `imprint_state` is 100 (earlier values sat in the firmware's
+"below 20, do nothing" branch), `0x01`/`0x02` are bools, and `0x0e` is present.
+Any one of those wrong and the record is silently mis-parsed while still
+round-tripping with a valid CRC.
 
 If you'd rather step through it manually:
 ```sh
@@ -85,7 +93,7 @@ node fuelband-dump.js --reset           # power-cycle over USB
 node fuelband-dump.js --checklist       # read imprinted on the fresh boot
 ```
 
-Other variants, if the above doesn't take:
+Diagnostics, if it doesn't take:
 ```sh
 node fuelband-dump.js --canonical --reset   # full record + reboot
 node fuelband-dump.js --idfuzz              # identity sweep (numeric DIN, all-FF legacy, …)
