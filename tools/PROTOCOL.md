@@ -571,3 +571,48 @@ anyone reproducing:
 - Both timestamps still read zero immediately before the DDB writes.
 
 A second blank band is the way to isolate the cause.
+
+### REPRODUCED on a second band
+
+Band 2 (serial 20M9FC6H01976), a pristine control at factory status 0x80, was
+also imprinted — over USB, no Nike servers.
+
+```
+80  ->  c0   (--autoimprint: bit6 set, byte2 3c->3f, imprinted still 0)
+c0  ->  c7   (--provision:   imprinted = 1, mode 0 -> 3)
+```
+
+Two bands, two different serials, both activated. Not a fluke.
+
+### What the isolation runs actually showed
+
+Testing single variables on the pristine band ruled several things out:
+
+- **The corrected DDB alone is NOT sufficient.** `--canonical` landed cleanly
+  (gd-len 0xc3 matched the 195-byte record) and imprinted stayed 0. So the TLV
+  format fix was necessary but not sufficient.
+- **run-state is not involved.** `[0x28, f1, 29, state]` is rejected on BOTH
+  bands (reply `01 01 07`, the empty-body "not recognised" shape), and it never
+  stamps the timestamps. Band 1 imprinted despite run-state being rejected, so it
+  cannot be the cause. Our marker payload is evidently wrong.
+- **goalSet is NOT the precondition.** Band 2 imprinted with goalSet still 0.
+  (Band 1 happened to have it set from earlier option writes; that was a red
+  herring.)
+- **bit6 is not "desktop data present".** `--canonical` wrote a record and left
+  bit6 clear; bit6 only set during the fuller sequence.
+- Both firmware timestamps (device-init, assessment-start) remained **zero**
+  throughout, on both bands, even after imprinting. So the assessment state
+  machine is not a precondition either.
+
+### Working recipe (empirical)
+
+On a blank band:
+```
+node fuelband-dump.js --autoimprint     # corrected DDB + access token + reboot
+node fuelband-dump.js --provision       # profile: metric, gender, 24h, goal, age, clock
+node fuelband-dump.js --checklist       # imprinted = 1
+```
+The single decisive command is still not isolated — the requirement appears to be
+a **fully configured profile** alongside the corrected record and the access
+token, rather than one magic opcode. `--provision` supplies the option writes
+(0x31/0x32/0x35/0x36/0x25 + clock) that `--autoimprint` alone does not.
