@@ -37,6 +37,33 @@ sh gen-certs.sh
 ```
 Produces `ca.crt`, `server.key`, `server.crt`.
 
+### EASIEST ROUTE: patch the app's hosts (no DNS, no cert trust)
+
+The API hostnames live in one XOR-obfuscated blob inside the binary, every
+endpoint URL is built by `${host}` interpolation (no endpoint hardcodes a host),
+and the client does **no certificate validation**. So repointing four strings at
+`127.0.0.1` redirects 100% of the traffic with no DNS spoofing and no keychain
+work:
+
+```sh
+cp "/Applications/Nike+ Connect.app/Contents/MacOS/Nike+ Connect" ~/nc-backup
+node patch-hosts.js "/Applications/Nike+ Connect.app/Contents/MacOS/Nike+ Connect" --verify   # show current hosts
+node patch-hosts.js "/Applications/Nike+ Connect.app/Contents/MacOS/Nike+ Connect"            # writes .patched
+mv "/Applications/Nike+ Connect.app/Contents/MacOS/Nike+ Connect.patched" \
+   "/Applications/Nike+ Connect.app/Contents/MacOS/Nike+ Connect"
+```
+Verified surgical on the 2014 build: 78 bytes changed, all inside the config
+blob, only the four host lines. Size is unchanged (padding goes outside the JSON
+strings so hostnames stay clean).
+
+Caveat: this invalidates the code signature. On pre-Catalina that is usually
+fine; if Gatekeeper objects, `xattr -cr` the .app or allow it in Security
+settings. Keep the backup.
+
+Then just run the mock server (steps 1 and 4) — you can skip the hosts file and
+the keychain entirely. **Note:** `config.dat` does NOT work for this — it is the
+firmware/device manifest and contains no hostnames at all.
+
 ### 2. Trust the CA — only needed for the BROWSER leg
 **The app itself does no certificate checking at all.** Disassembly of
 `HttpRequest.cc` shows it calls `curl_easy_setopt` with
