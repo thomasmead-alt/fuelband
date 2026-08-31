@@ -1745,6 +1745,55 @@ async function memBanks(dev, from = 0, to = 15) {
   console.log("\nBanks marked <DATA> hold real content — worth paging through.");
 }
 
+// Does writing run-state make the firmware stamp its own timestamps?
+//
+// Confirmed on hardware: device-init and assessment-start both read 0 — the band
+// has never initialised and never begun its assessment (Nike's code has the
+// literal error "assessment-started timestamp is zero!"). saveRunState writes
+// run-state and then reads exactly these two timestamps, pairing bit 0x02 with
+// assessment-start and bit 0x10 with device-init. So run-state is the plausible
+// trigger. 0x42 is read-only, so the firmware is the only thing that can stamp
+// them — which makes them a clean before/after oracle for "did we finally move
+// the firmware's own state machine?".
+async function runStateTest(dev) {
+  console.log("\n=== RUN-STATE -> TIMESTAMP TEST ===");
+  const readTs = async (id, label) => {
+    outWrite(dev, frameSys([0x42, id]));
+    await delay(130);
+    const d = tryRead(dev, 1).data || [];
+    // [reportId][len][0x07][value:4 BE][id]
+    let val = null;
+    if (d.length >= 8) val = ((d[3] << 24) | (d[4] << 16) | (d[5] << 8) | d[6]) >>> 0;
+    console.log(`    ${label.padEnd(20)} ${hex(d) || "-"}${val !== null ? `   value=${val}${val ? "  <<< NON-ZERO" : " (zero)"}` : ""}`);
+    return val;
+  };
+  const snapshot = async (tag) => {
+    console.log(`  ${tag}:`);
+    const a = await readTs(0x02, "assessment-start");
+    const b = await readTs(0x01, "device-init");
+    return [a, b];
+  };
+
+  const before = await snapshot("before");
+
+  for (const st of [0x02, 0x12]) {
+    console.log(`\n  --> writing run-state 0x${st.toString(16)} (28 f1 29 ${st.toString(16).padStart(2, "0")})`);
+    outWrite(dev, frameSys([0x28, 0xf1, 0x29, st]));
+    await delay(200);
+    console.log(`      reply: ${hex(tryRead(dev, 1).data || []) || "-"}`);
+    await delay(150);
+    const now = await snapshot(`after run-state 0x${st.toString(16)}`);
+    if ((now[0] && !before[0]) || (now[1] && !before[1])) {
+      console.log("\n  *** A TIMESTAMP WAS STAMPED — the firmware state machine moved ***");
+      console.log("  Re-check status now:  node fuelband-dump.js --checklist");
+      return true;
+    }
+  }
+  console.log("\n  Both timestamps still zero: run-state writes do not trigger them.");
+  console.log("  That points at a precondition the USB command set cannot assert.");
+  return false;
+}
+
 // Read the SYSTEM-RESERVED region (doReadSystemReserved, opcode 0xce).
 // Derived from the Mac plugin (fuelbandplugin.dylib, i386): the method does
 // submit(0xce, [N]) where N is the byte count to read, reply on the feature
@@ -2230,6 +2279,9 @@ async function dumpMemory(dev, maxBytes = 320) {
       await identity(dev);
       if (which === "refresh") await tokenTest(dev, 0x41);
       else await tokenTest(dev, 0x40);
+    } else if (process.argv.includes("--runstatetest")) {
+      await identity(dev);
+      await runStateTest(dev);
     } else if (process.argv.includes("--membanks")) {
       const mi = process.argv.indexOf("--membanks");
       const a = parseInt(process.argv[mi + 1] ?? "0", 16);
