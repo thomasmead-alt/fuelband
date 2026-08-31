@@ -1790,7 +1790,19 @@ async function readSysReserved(dev, from = 0, to = 15) {
 // internal fault log (0x06).
 async function extraReads(dev) {
   console.log("\n=== UNEXERCISED READ-ONLY GETTERS ===");
-  for (const [label, cmd] of [["assessment-metrics", [0x17]], ["fault-log", [0x06]]]) {
+  // The band runs its own "assessment" state machine: older Connect builds
+  // gated imprint states StartFirst24(35)/InFirst24(40)/First24Done(50) on it,
+  // polling run-state for "ASSESSMENT COMPLETE", reading the assessment-start
+  // timestamp, and computing getAssessmentTimeRemaining ("Assessment still in
+  // progress." / "assessment-started timestamp is zero!"). If the firmware
+  // requires a completed assessment before it will consider itself imprinted,
+  // these three reads are where that shows up. All read-only.
+  for (const [label, cmd] of [
+        ["run-state (read)",   [0x28]],
+        ["ts assessment-start",[0x42, 0x02]],
+        ["ts device-init",     [0x42, 0x01]],
+        ["assessment-metrics", [0x17]],
+        ["fault-log",          [0x06]]]) {
     outWrite(dev, frameSys(cmd));
     await delay(160);
     let best = null;
