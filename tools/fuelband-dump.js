@@ -1385,6 +1385,37 @@ async function autoImprint(dev) {
   try { nd.close(); } catch {}
 }
 
+// Page the whole DesktopOptions record out of the band.
+// getDesktopData replies [01][len][0x07][status][tok:3][data]; status 0x01 means
+// more follows and tok is the running offset, so the continuation read is
+// [0x50, 0x37, 0x36, tok0, tok1, tok2]. A single block is only ~56 bytes, which
+// is why a first-block-only read never reaches the TLV region at byte 148.
+async function readDesktopFull(dev, maxBlocks = 32) {
+  let tok = [0x00, 0x00, 0x00];
+  const all = [];
+  for (let i = 0; i < maxBlocks; i++) {
+    outWrite(dev, frameSys([0x50, 0x37, 0x36, tok[0], tok[1], tok[2]]));
+    await delay(150);
+    let d = null;
+    for (const rid of [4, 3, 2, 1]) {
+      const r = tryRead(dev, rid);
+      if (!r.error && r.data && r.data.length > 4) {
+        const b = Array.prototype.slice.call(r.data, 0);
+        if (!d || b.length > d.length) d = b;
+      }
+    }
+    if (!d) break;
+    const status = d[3];
+    const nextTok = [d[4], d[5], d[6]];
+    all.push(...d.slice(7));
+    if (status !== 0x01) break;
+    const off = (nextTok[0] << 16) | (nextTok[1] << 8) | nextTok[2];
+    if (off === 0 || off <= all.length - d.slice(7).length) break;   // no progress
+    tok = nextTok;
+  }
+  return all;
+}
+
 // DECISIVE TEST: does the firmware PARSE the DesktopOptions record, or does it
 // just store the bytes opaquely and hand them back?
 //
@@ -1417,18 +1448,12 @@ async function echoTest(dev) {
   try { await x.send(blob); } catch (e) { console.log(`write failed: ${e.message}`); return; }
   await delay(250);
 
-  outWrite(dev, frameSys([0x50, 0x37, 0x36, 0x00, 0x00, 0x00]));
-  await delay(160);
-  let got = [];
-  for (const rid of [4, 3, 2, 1]) {
-    const r = tryRead(dev, rid);
-    if (!r.error && r.data && r.data.length > 8) { got = Array.prototype.slice.call(r.data, 3); break; }
-  }
+  const got = await readDesktopFull(dev);
   if (!got.length) { console.log("no readback"); return; }
-  console.log(`readback : ${hex(got.slice(0, 64))}`);
-  // Compare the TLV region we can see against what we sent.
-  const sentTlv = hex(blob.slice(148, 148 + 24));
-  const gotTlv = hex(got.slice(4 + 148, 4 + 148 + 24));   // skip the 4-byte response header
+  console.log(`readback : ${got.length} bytes; head ${hex(got.slice(0, 16))}`);
+  // Compare the TLV region (starts at record byte 148: 4 len + 3*48 identity).
+  const sentTlv = hex(blob.slice(148, 148 + 32));
+  const gotTlv = hex(got.slice(148, 148 + 32));
   console.log(`\n  sent TLV head: ${sentTlv}`);
   console.log(`  read TLV head: ${gotTlv}`);
   if (gotTlv && sentTlv === gotTlv) {
@@ -2361,6 +2386,13 @@ async function dumpMemory(dev, maxBytes = 320) {
       const off = parseInt(process.argv[gi + 1] || "0", 16);
       await identity(dev);
       await getDesktopData(dev, off);
+      const full = await readDesktopFull(dev);
+      console.log(`\nfull record: ${full.length} bytes`);
+      for (let i = 0; i < full.length; i += 32) {
+        const row = full.slice(i, i + 32);
+        const asc = row.map((b) => (b >= 0x20 && b < 0x7f) ? String.fromCharCode(b) : ".").join("");
+        console.log(`  ${i.toString(16).padStart(4, "0")}  ${hex(row).padEnd(96)}  ${asc}`);
+      }
     } else if (process.argv.includes("--provision")) {
       await identity(dev);
       await provision(dev);
