@@ -522,3 +522,52 @@ Both answer the same question: **what performs activation on F2.12?**
 | flag | why |
 |---|---|
 | `--surface [lo] [hi]` | sweeps unnamed opcodes; this is what disabled band 1 |
+
+---
+
+## ACTIVATION ACHIEVED — imprinted bit set and persistent
+
+A factory-blank gen-1 band (serial 20M9FC5V01660, firmware F2.12) was imprinted
+over USB with no Nike servers, using `--autoimprint`.
+
+```
+before:  status c8 cf 3c 66 06 ff 0f 00   imprinted=0  mode=0
+after:   status cf cf 3f 66 06 ff 0f 00   imprinted=1  mode=3
+```
+
+The bit survived a full power cycle (`doReset` 0x01 + magic `81 b4`, band
+re-enumerated), so it is persisted in flash, not a runtime artifact. `mode` also
+advanced 0 -> 3 and status byte 2 went 3c -> 3f: the firmware's own state
+machine moved, which nothing prior had ever caused.
+
+### What was different this time
+
+Five things were simultaneously correct for the first time. Every earlier attempt
+was writing a structurally invalid record:
+
+1. **String TLVs length-prefixed** (`[tag][len][bytes]`, no trailing NUL).
+   Previously the length byte was omitted, so the parser read the first character
+   of the string as a length and desynced from tag 0x05 onward -- tags 0x06, 0x07,
+   0x0c, 0x0f and 0x0d were never parsed at all.
+2. **imprint_state = 100 (0x64, "Complete")**. Earlier values (1/2/3) all fell in
+   the firmware's `< 20` "do nothing" branch.
+3. **0x01/0x02 as bools with len 1**, not u32 -- a known tag with the wrong
+   length is silently skipped.
+4. **0x0e (clock auto set) emitted**, which Nike always writes and we omitted.
+5. **run-state 0x12 sent before the DDB write**, matching saveDesktopAttributes'
+   real order.
+
+Plus the access token (0x40) was written, and echoed back correctly.
+
+### Not yet isolated
+
+This was a combined change, so which element was decisive is unknown. Notes for
+anyone reproducing:
+- The DDB loop wrote imprint_state 100, then 30, 20 and 10, so the record left on
+  the band ends at 10 (SetupComplete), yet the bit still set.
+- `0x41` (refresh token) and the run-state write both replied `01 01 07` (empty
+  body), the "not recognised" shape -- so run-state may not have been accepted in
+  that form even though the sequence as a whole succeeded.
+- Both timestamps still read zero immediately before the DDB writes.
+
+A second blank band is the way to isolate the cause.
