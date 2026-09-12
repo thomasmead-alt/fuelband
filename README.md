@@ -12,6 +12,10 @@ publicly before — every prior project stopped short of activation.
 
 ## What this does
 
+**→ Just want to revive your band? Read [`ACTIVATE.md`](ACTIVATE.md).** It's a
+complete, self-contained guide with no prior knowledge assumed. Everything below
+is context and reference.
+
 A gen-1 FuelBand that was never set up is inert: it powers on, shows a USB
 prompt, and waits for software that no longer exists. This project:
 
@@ -68,6 +72,7 @@ decoded workout history; the export is current totals only).
 
 | File | What's in it |
 |---|---|
+| [`ACTIVATE.md`](ACTIVATE.md) | **Start here** — the complete guide to activating a band, for anyone |
 | [`tools/PROTOCOL.md`](tools/PROTOCOL.md) | The USB wire protocol, settings-record format, activation findings |
 | [`tools/NIKE-CONNECT-ARCHITECTURE.md`](tools/NIKE-CONNECT-ARCHITECTURE.md) | How the original desktop software is built |
 | [`tools/RUNBOOK.md`](tools/RUNBOOK.md) | Ordered, copy-pasteable commands |
