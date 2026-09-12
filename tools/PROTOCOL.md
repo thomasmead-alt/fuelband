@@ -527,6 +527,79 @@ Both answer the same question: **what performs activation on F2.12?**
 
 ## ACTIVATION ACHIEVED — imprinted bit set and persistent
 
+### The imprint sequence, in full
+
+There is no imprint *command*. Nothing in the protocol writes the `imprinted`
+bit — the firmware sets it itself. What the host sends is an ordered batch,
+which `--autoimprint` reproduces exactly:
+
+```
+  step  what                bytes on the wire                why it's there
+  ────  ──────────────────  ───────────────────────────────  ─────────────────────────────
+   1    access token        07 40 f3 3d ff 26 …28B… 00       must be present, non-empty
+   2    refresh token       07 41 f3 3d ff 26 …32B… 00       same shape, longer value
+   3    run-state           07 28 f1 29 12                   0x12, DERIVED from state 100
+   4    timestamp reads     07 42 02   then   07 42 01       0x12 sets bits 0x02 and 0x10
+   5    settings record     07 51 83 a2 …          × 6       277 bytes, six chunks
+   6    option-age          07 35 1e                         the one profile field in-batch
+   7    read-back           07 50 37 36 00 00 00             verify only — no commit exists
+   8    clock               07 21 <unix:4> <gmt:4> 00        last, matching the DLL's order
+
+  then: reset -> --provision (goal, metric, gender, 24h, age, clock) -> read status
+```
+
+Step 3 is **rejected on both bands** (reply `01 01 07`) and they imprinted
+anyway. It stays in because it is what the app sent; it is demonstrably not the
+trigger.
+
+**The record (step 5).** Fixed header, then the ten tagged fields in exactly
+this order, then the CRC:
+
+```
+  [len:4 BE] [DIN:48] [UDI:48] [groupConfigId:48]  <- fixed, NUL-padded
+  ┌──────────────────────────────────────────────────────────────────────┐
+  │  1. 0x01  metric weight    bool    len 1                             │
+  │  2. 0x02  metric height    bool    len 1                             │
+  │  3. 0x0b  IMPRINT_STATE    u32 BE  len 4   <- = 100 (0x64) or nothing│
+  │  4. 0x05  email            string  len N   <- length-prefixed, no NUL│
+  │  5. 0x06  birthdate        string  len N                             │
+  │  6. 0x07  screen name      string  len N                             │
+  │  7. 0x0c  first name       string  len N                             │
+  │  8. 0x0f  band name        string  len N   <- out of numeric order!  │
+  │  9. 0x0d  profile update   i64 BE  len 8                             │
+  │ 10. 0x0e  clock auto set   bool    len 1                             │
+  └──────────────────────────────────────────────────────────────────────┘
+  [CRC-16/XMODEM:2 BE]   over everything after the 4-byte length header
+```
+
+Every length must be exact: a known tag with the wrong length is skipped in
+silence. `0x0f` really does precede `0x0d`.
+
+**The chunking (step 5 continued).** 277 bytes over a transport that carries 53
+data bytes per write:
+
+```
+  offset    0        53       106      159      212      265
+            ├────────┼────────┼────────┼────────┼────────┼────┤
+  data      53B      53B      53B      53B      53B      12B
+  flag      0        1        1        1        1        2
+
+  each write:  [0x51][83 a2][flag][offset:3 BE][data ≤53B]    (inside the 07 frame)
+```
+
+- The offset counts **data bytes only** — `83 a2` repeats in every chunk and is
+  never counted.
+- `flag` 2 marks the final chunk, but a transfer that fits in one chunk stays 0.
+- The band acks each write with the running offset.
+- **No begin, no commit, no flush.** The sequence just ends, which is why a
+  half-written record leaves no trace of being half-written.
+
+For this record (DIN/UDI `42…`, 28-byte access token, 32-byte refresh token,
+names `user`/`Fuel`, imprint_state 100) the header is `00 00 01 15` = 277 and
+the CRC is `6f 26`. Reproduce with `--canonical` and diff against your own.
+
+---
+
 A factory-blank gen-1 band (serial 20M9FC5V01660, firmware F2.12) was imprinted
 over USB with no Nike servers, using `--autoimprint`.
 
