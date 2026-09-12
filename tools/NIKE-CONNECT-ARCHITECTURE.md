@@ -163,8 +163,8 @@ fewer than 4 bytes remain or the next tag byte is `0xFF`.
 
 | Tag | Field | Type |
 |---|---|---|
-| `0x01` | metric weight | bool, len **must** be 1 |
-| `0x02` | metric height | bool, len 1 |
+| `0x01` | weight **units** | 1-byte flag — *not* a weight value |
+| `0x02` | height **units** | 1-byte flag — *not* a height value |
 | `0x05` | email | string (length-prefixed, **no NUL**) |
 | `0x06` | birthdate | string |
 | `0x07` | screen name | string |
@@ -175,6 +175,13 @@ fewer than 4 bytes remain or the next tag byte is `0xFF`.
 | `0x0f` | band name | string |
 
 Emission order is `01 02 0b 05 06 07 0c 0f 0d 0e` (note `0f` really does precede `0d`).
+
+`0x01`/`0x02` select display units; they do **not** carry measurements. The
+members they load sit at struct offsets `+0x00` and `+0x01` — two adjacent single
+bytes, with the `u32` at `+0x04` — which no multi-byte value could do. The actual
+weight and height are option commands `0x33`/`0x34`, stored imperial-only, so a
+per-dimension unit flag is exactly what the record needs. `len 1` is certain;
+whether the byte is strictly boolean or a small enum (lb/kg/stone) is not.
 Tags `0x00, 0x03, 0x04, 0x08, 0x09, 0x0a` are unknown/passthrough — the writer re-emits
 any it saw on read, verbatim.
 

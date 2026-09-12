@@ -296,8 +296,9 @@ Payload: three fixed 48-byte identifier fields, then TLV options.
 | 96 | `device group config id` (48B, Nike-issued) |
 | 144+ | TLV options |
 
-TLV: `tag(2B BE) len(1B) value(len bytes, BE)`. Confirmed tags: `0x0001` metric
-weight, `0x0002` metric height, `0x000b` **imprint_state** (u32), `0x0005` email.
+TLV: `tag(2B BE) len(1B) value(len bytes, BE)`. Confirmed tags: `0x0001`
+**weight units**, `0x0002` **height units** (both 1-byte flags — *not* weight and
+height values; see the note below), `0x000b` **imprint_state** (u32), `0x0005` email.
 Also serialized: birthdate, screen name, first name, band name, profile update
 date, clock auto set.
 
@@ -558,8 +559,8 @@ this order, then the CRC:
 ```
   [len:4 BE] [DIN:48] [UDI:48] [groupConfigId:48]  <- fixed, NUL-padded
   ┌──────────────────────────────────────────────────────────────────────┐
-  │  1. 0x01  metric weight    bool    len 1                             │
-  │  2. 0x02  metric height    bool    len 1                             │
+  │  1. 0x01  weight units     flag    len 1   <- NOT a weight value     │
+  │  2. 0x02  height units     flag    len 1   <- NOT a height value     │
   │  3. 0x0b  IMPRINT_STATE    u32 BE  len 4   <- = 100 (0x64) or nothing│
   │  4. 0x05  email            string  len N   <- length-prefixed, no NUL│
   │  5. 0x06  birthdate        string  len N                             │
@@ -574,6 +575,33 @@ this order, then the CRC:
 
 Every length must be exact: a known tag with the wrong length is skipped in
 silence. `0x0f` really does precede `0x0d`.
+
+**Tags 0x01 and 0x02 are unit flags, not measurements.** The naming in earlier
+drafts ("metric weight", "metric height") invited the opposite reading. Two
+independent lines of evidence:
+
+1. **Struct layout.** The fields they deserialize into sit at member offsets
+   `+0x00` and `+0x01` — two *adjacent single bytes* — with the `u32`
+   imprint_state at `+0x04` (i.e. two bytes of alignment padding between them).
+   A weight or height value cannot occupy one byte at `+0x01` with another field
+   at `+0x00`. Only two 1-byte members produce that layout.
+2. **The values live elsewhere.** Weight and height are not in this record at
+   all. They are option commands — `0x33` weight (`u16`, tenths of a pound) and
+   `0x34` height (`u16`, quarter-inches) — and the band stores both in imperial
+   regardless of display. A *per-dimension display-unit* flag is exactly the
+   missing piece, and explains why there are two flags rather than one: pounds
+   with centimetres is a common US preference. (`0x32` is a third, separate
+   units option.)
+
+One caveat we cannot settle without the binaries: **`len 1` is solid, "bool" may
+be too specific.** A 1-byte field could be a small enum rather than a flag —
+lb / kg / stone, say, since stone is used for body weight in the UK. Anything
+0–255 round-trips either way, so this does not change what we write.
+
+**A test that would settle it**, for anyone with a band: write the record with
+`0x01 = 1`, then read the weight option back with `--readprofile`. If `0x33` is
+unchanged, `0x01` is definitively not a weight. Then try `0x01 = 0` vs `1` and
+watch whether the band's own weight display switches between lb and kg.
 
 **The chunking (step 5 continued).** 277 bytes over a transport that carries 53
 data bytes per write:

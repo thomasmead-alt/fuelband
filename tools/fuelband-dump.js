@@ -1165,8 +1165,14 @@ function buildBlob({ imprintState = 1, din = null, udi = null, groupId = null, e
 //   serializer emits TLVs in this order: 01 02 0b 05 06 07 0c 0f 0d 0e
 // AUTHORITATIVE tag table, from DesktopOptions::init's jump table (0x23188)
 // and as_vector. Wire form is [tag u16 BE][len u8][value]; advance = len + 3.
-//   0x01 metric weight       bool, len MUST be 1   (member +0x01)
-//   0x02 metric height       bool, len MUST be 1   (+0x00)
+//   0x01 weight UNITS        1-byte flag, len MUST be 1  (member +0x01)
+//   0x02 height UNITS        1-byte flag, len MUST be 1  (+0x00)
+//        ^ These select DISPLAY UNITS; they are NOT weight/height values.
+//          +0x00 and +0x01 are two adjacent single bytes (the u32 sits at
+//          +0x04, i.e. two bytes of padding between), which no multi-byte
+//          measurement could occupy. The real values are option commands
+//          0x33/0x34, stored imperial-only. len 1 is certain; "bool" vs a
+//          small enum (lb/kg/stone) is not settled.
 //   0x05 email               string, len = byte count, NO NUL   (+0x34)
 //   0x06 birthdate           string                (+0x40)
 //   0x07 screen name         string                (+0x4c)
