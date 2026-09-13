@@ -2182,6 +2182,102 @@ async function readProfile(dev) {
   await rd("clock",  [0x21], decodeBandClock);
 }
 
+// ---- Compact reporting ----------------------------------------------------
+// A raw region dump is mostly padding — the settings region comes back as 262
+// useful bytes followed by ~1500 bytes of 0xff. Collapsing identical rows the
+// way hexdump does turns that into something you can actually paste.
+function hexDumpCollapsed(bytes, { base = 0, maxRows = 64 } = {}) {
+  const lines = [];
+  let prev = null, repeat = 0, rows = 0;
+  for (let off = 0; off < bytes.length; off += 16) {
+    const row = bytes.slice(off, off + 16);
+    const key = row.join(",");
+    if (key === prev) { repeat++; continue; }
+    if (repeat) { lines.push(`  *  (${repeat} more identical row${repeat > 1 ? "s" : ""})`); repeat = 0; }
+    if (rows++ >= maxRows) { lines.push(`  … truncated at ${maxRows} rows`); return lines.join("\n"); }
+    const h = row.map((b) => b.toString(16).padStart(2, "0")).join(" ").padEnd(47);
+    const a = row.map((b) => (b >= 0x20 && b < 0x7f) ? String.fromCharCode(b) : ".").join("");
+    lines.push(`  ${(base + off).toString(16).padStart(4, "0")}  ${h}  |${a}|`);
+    prev = key;
+  }
+  if (repeat) lines.push(`  *  (${repeat} more identical row${repeat > 1 ? "s" : ""})`);
+  return lines.join("\n");
+}
+
+// Everything relevant to the workout-store question, in one paste-sized dump.
+// Read-only throughout.
+async function storeReport(dev) {
+  console.log("\n================ WORKOUT-STORE REPORT ================");
+  console.log("Read-only. Paste this whole block back.\n");
+
+  const rd = async (cmd, rid = 1) => {
+    outWrite(dev, frameSys(cmd)); await delay(120);
+    return Array.from(tryRead(dev, rid).data || []);
+  };
+  const u24 = (d, at = 3) => (d && d.length >= at + 3) ? ((d[at] << 16) | (d[at + 1] << 8) | d[at + 2]) : null;
+
+  console.log(`captured   ${new Date().toISOString()}`);
+  const ser = await readSystem(dev, [0xe1]);
+  console.log(`serial     ${ser ? ascii(ser).replace(/\0+$/, "").trim() : "?"}`);
+
+  const clockD = await rd([0x21]);
+  const bc = clockD.length >= 7 ? (((clockD[3] << 24) | (clockD[4] << 16) | (clockD[5] << 8) | clockD[6]) >>> 0) : null;
+  console.log(`band clock ${bc ? new Date(bc * 1000).toISOString().slice(0, 19).replace("T", " ") : "?"}`);
+
+  const st = await rd([0xdf]);
+  console.log(`status     ${hex(st.slice(3)) || "-"}`);
+  console.log(`fuel       ${u24(await rd([0x24]))}`);
+  console.log(`0x2a       ${u24(await rd([0x2a]))}      (suspected steps)`);
+  console.log(`0x2b       ${u24(await rd([0x2b]))}      (suspected calories)`);
+
+  // 0x17 is literally "sample query". A query taking no arguments is odd, so
+  // try a few small parameters as well as the bare form. All reads.
+  console.log(`\n--- 0x17 sample query ---`);
+  for (const args of [[], [0x00], [0x01], [0x02]]) {
+    const d = await rd([0x17, ...args]);
+    const body = d.slice(3);
+    const live = body.some((b) => b !== 0x00 && b !== 0xff);
+    console.log(`  0x17 ${args.length ? hex(args) : "(bare)"} -> ${body.length}B  ${hex(body.slice(0, 24))}` +
+                `${body.length > 24 ? " …" : ""}${live ? "   <DATA>" : ""}`);
+    await delay(80);
+  }
+
+  console.log(`\n--- selector sweep on the 0x50 getter ---`);
+  const hits = [];
+  for (let sel = 0; sel <= 0xff; sel++) {
+    outWrite(dev, frameSys([0x50, 0x37, sel, 0x00, 0x00, 0x00]));
+    await delay(90);
+    let d = null;
+    for (const rid of [4, 3, 2, 1]) {
+      const r = tryRead(dev, rid);
+      if (!r.error && r.data && r.data.length > 7) {
+        const b = Array.prototype.slice.call(r.data, 0);
+        if (!d || b.length > d.length) d = b;
+      }
+    }
+    if (!d) continue;
+    const body = d.slice(7);
+    if (!body.length) continue;
+    if (!body.some((x) => x !== 0x00 && x !== 0xff)) continue;
+    hits.push(sel);
+    console.log(`  sel 0x${sel.toString(16).padStart(2, "0")} -> ${body.length}B  ${hex(body.slice(0, 20))}` +
+                `${sel === 0x36 ? "   (settings record — control)" : "   *** CANDIDATE ***"}`);
+  }
+  if (!hits.includes(0x36)) console.log("  !! control 0x36 did not answer — sweep unreliable, ignore the rest");
+  else if (hits.length === 1) console.log("  only the control answered; the store is not behind this getter");
+
+  console.log(`\n--- internal flash banks (0x52) ---`);
+  for (let bank = 1; bank <= 6; bank++) {
+    const b = await dumpBankQuiet(dev, bank);
+    const live = b.some((x) => x !== 0x00 && x !== 0xff);
+    console.log(`\n  bank ${bank}: ${b.length} bytes${live ? "" : "  (all blank)"}`);
+    if (b.length && live) console.log(hexDumpCollapsed(b, { maxRows: 24 }));
+    await delay(60);
+  }
+
+  console.log("\n================ END OF REPORT ================");
+}
+
 // ---- Finding the store ----------------------------------------------------
 // Both region reads we know have the SAME shape:
 //
@@ -3313,6 +3409,9 @@ function parseRecordArgs(argv) {
       }
       await identity(dev);
       await writeRecord(dev, o);
+    } else if (process.argv.includes("--storereport")) {
+      await identity(dev);
+      await storeReport(dev);
     } else if (process.argv.includes("--findstore")) {
       const fi = process.argv.indexOf("--findstore");
       const a0 = parseInt(process.argv[fi + 1] ?? "0", 16);
