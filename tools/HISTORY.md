@@ -29,6 +29,43 @@ Everything below is **read-only**. Nothing writes to the band.
 
 ---
 
+## Start here: find where the store lives
+
+Before any of the differential work, there is one targeted thing to try, and it
+comes from a pattern hiding in plain sight. Both region reads we already know
+have the **same shape**:
+
+```
+   [opcode] 0x37 [selector] [offset:3 BE]
+     0x50    0x37    0x36      ...           -> the settings record
+     0x52    0x37   <bank>     ...           -> internal flash banks 1..6
+```
+
+`0x37` is a constant marker; the byte after it **selects what you get back**.
+And we have only ever sent one selector — `0x36` — to the `0x50` getter.
+
+```sh
+node fuelband-dump.js --findstore
+```
+
+This sweeps that selector across `0x00`–`0xff` using `0x50`, the read-only
+getter the tool already uses on every run. It is one parameter varied on a known
+safe call, not a blind sweep of unknown opcodes. Selector `0x36` acts as a
+**positive control**: it must come back with the settings record. If the control
+doesn't answer, the sweep isn't working and a lack of other hits proves nothing.
+
+Anything else that returns real data is a candidate for the sample store. Feed
+it into the snapshots:
+
+```sh
+node fuelband-dump.js --snapshot before --sel 0x55,0x56
+```
+
+> `0x50` is the getter. `0x51` is the *setter* — the sweep deliberately does not
+> touch it.
+
+---
+
 ## The method
 
 ### 1. Take a baseline snapshot
@@ -46,7 +83,7 @@ This captures, into a timestamped JSON file:
 - the `0x17` sample-query reply — 21 bytes of zeros on a factory band, and the
   most likely home for a store header
 - internal flash banks 1–6 (`0x52`)
-- four candidate store regions read the same way the settings record is read
+- the settings record, plus any selectors you pass with `--sel`
 
 ### 2. Go and do something
 
@@ -131,9 +168,10 @@ three so the comparison can tell us.
    everything on its own.
 2. **Does `0x17` take parameters?** It's called "sample *query*". A query with no
    arguments is odd. It may want a start time, an index, or a count.
-3. **Which region code holds the store?** `P76` is the settings. The snapshot
-   tries `P77`, `P78` and `S76` as guesses; there may be a better way to find
-   the real one than guessing.
+3. **Which selector holds the store?** `0x36` is the settings record. An earlier
+   draft of this document guessed at region *names* (`P77`, `S76`); that was a
+   misreading — `50 37 36` is opcode + marker + selector, not a three-character
+   name. `--findstore` sweeps the selector properly.
 4. **Where in the `0x19` address space do samples live?** A sweep is slow but
    would settle it. `--snapshot <label> --mem <start-hex> <length-hex>` includes
    one if you want to try.

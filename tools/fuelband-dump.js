@@ -2177,6 +2177,74 @@ async function readProfile(dev) {
   await rd("clock",  [0x21], decodeBandClock);
 }
 
+// ---- Finding the store ----------------------------------------------------
+// Both region reads we know have the SAME shape:
+//
+//     [opcode] 0x37 [selector] [offset:3 BE]
+//       0x50     0x37   0x36      ...          -> the settings record
+//       0x52     0x37   <bank>    ...          -> internal flash banks 1..6
+//
+// So 0x37 is a constant marker and the byte after it selects what you get. We
+// have only ever sent ONE selector (0x36) to the 0x50 getter. Sweeping that
+// selector is the obvious next move and is far better targeted than guessing
+// region names: it is the same read-only getter the tool already uses on every
+// run, with one parameter varied.
+//
+// 0x50 is getDesktopData — the GETTER. (0x51 is the setter; we do not sweep
+// that.) Selector 0x36 acts as a positive control: it must come back with the
+// settings record, which tells you the sweep is working at all.
+async function findStore(dev, lo = 0x00, hi = 0xff) {
+  console.log("\n=== SELECTOR SWEEP (read-only) ===");
+  console.log("Sending [0x50 0x37 <selector> 00 00 00] — the same getter that reads");
+  console.log("the settings record, with the selector varied. 0x36 is the control.\n");
+  console.log("  sel | bytes | preview");
+
+  const hits = [];
+  for (let sel = lo; sel <= hi; sel++) {
+    outWrite(dev, frameSys([0x50, 0x37, sel, 0x00, 0x00, 0x00]));
+    await delay(110);
+    let d = null;
+    for (const rid of [4, 3, 2, 1]) {
+      const r = tryRead(dev, rid);
+      if (!r.error && r.data && r.data.length > 7) {
+        const b = Array.prototype.slice.call(r.data, 0);
+        if (!d || b.length > d.length) d = b;
+      }
+    }
+    if (!d) continue;
+    const body = d.slice(7);
+    if (!body.length) continue;
+    const live = body.some((x) => x !== 0x00 && x !== 0xff);
+    const known = sel === 0x36 ? "  <- settings record (control)" : (live ? "   *** DATA ***" : "");
+    if (live || sel === 0x36) {
+      const asc = body.slice(0, 16).map((b) => (b >= 0x20 && b < 0x7f) ? String.fromCharCode(b) : ".").join("");
+      console.log(`  0x${sel.toString(16).padStart(2, "0")} | ${String(body.length).padStart(5)} | ` +
+                  `${hex(body.slice(0, 12))}  |${asc}|${known}`);
+      hits.push({ selector: sel, bytes: body.length, live });
+    }
+  }
+
+  console.log("");
+  const control = hits.find((h) => h.selector === 0x36);
+  if (!control) {
+    console.log("  The 0x36 control did NOT answer — the sweep isn't working, so a lack of");
+    console.log("  other hits proves nothing. Check the band is awake and try --checklist.");
+    return hits;
+  }
+  const others = hits.filter((h) => h.selector !== 0x36 && h.live);
+  if (!others.length) {
+    console.log("  Control answered, nothing else did. The store is not reachable through");
+    console.log("  this selector — try the 0x52 sweep (--membanks) or the 0x19 address space.");
+  } else {
+    console.log(`  ${others.length} other selector(s) returned real data: ` +
+                others.map((h) => `0x${h.selector.toString(16)}`).join(", "));
+    console.log("  Snapshot those before and after wearing the band:");
+    console.log(`    node fuelband-dump.js --snapshot before --sel ` +
+                others.map((h) => `0x${h.selector.toString(16)}`).join(","));
+  }
+  return hits;
+}
+
 // ---- Historic-data research ----------------------------------------------
 // The sample store has never been decoded publicly. We are not going to guess
 // it from a single dump — the way a format like this falls is DIFFERENTIALLY:
@@ -2189,21 +2257,18 @@ async function readProfile(dev) {
 // `--compare a.json b.json` does the analysis offline, so it can be developed
 // and tested without hardware.
 
-// Candidate regions for the sample store, in the region-read framing that the
-// desktop-data region ("P76") uses. If the store is reachable this way, one of
-// these should return something that grows as you wear the band.
-const STORE_REGIONS = [
-  { name: "P76 (desktop data — known)", region: [0x50, 0x37, 0x36] },
-  { name: "P77", region: [0x50, 0x37, 0x37] },
-  { name: "P78", region: [0x50, 0x37, 0x38] },
-  { name: "S76", region: [0x53, 0x37, 0x36] },
-];
+// Selectors to capture in a snapshot. 0x36 is the settings record (a known
+// quantity, and a useful control); anything --findstore turns up gets added on
+// the command line with --sel.
+const DEFAULT_SELECTORS = [0x36];
 
-async function readRegion(dev, region, maxBlocks = 24) {
+// Page one selector through the 0x50 GETTER — the same call readDesktopFull
+// makes, with the selector as a parameter. Not the 0x51 setter.
+async function readSelector(dev, sel, maxBlocks = 24) {
   let tok = [0x00, 0x00, 0x00];
   const all = [];
   for (let i = 0; i < maxBlocks; i++) {
-    outWrite(dev, frameSys([0x51, ...region, ...tok]));
+    outWrite(dev, frameSys([0x50, 0x37, sel, ...tok]));
     await delay(120);
     let d = null;
     for (const rid of [4, 3, 2, 1]) {
@@ -2225,7 +2290,7 @@ async function readRegion(dev, region, maxBlocks = 24) {
   return all;
 }
 
-async function snapshot(dev, label, memStart, memLen) {
+async function snapshot(dev, label, memStart, memLen, selectors = DEFAULT_SELECTORS) {
   const fs = require("fs");
   console.log("\n=== SNAPSHOT (read-only) ===");
   const rd = async (cmd, rid = 1) => {
@@ -2277,10 +2342,11 @@ async function snapshot(dev, label, memStart, memLen) {
   }
   console.log(`  banks captured: ${Object.keys(snap.banks).join(", ") || "none"}`);
 
-  for (const r of STORE_REGIONS) {
-    const d = await readRegion(dev, r.region);
-    if (d.length) snap.regions[r.name] = hex(d);
-    console.log(`  region ${r.name.padEnd(28)} ${d.length} bytes`);
+  for (const sel of selectors) {
+    const d = await readSelector(dev, sel);
+    const name = `sel 0x${sel.toString(16).padStart(2, "0")}` + (sel === 0x36 ? " (settings)" : "");
+    if (d.length) snap.regions[name] = hex(d);
+    console.log(`  ${name.padEnd(24)} ${d.length} bytes`);
     await delay(80);
   }
 
@@ -3242,6 +3308,12 @@ function parseRecordArgs(argv) {
       }
       await identity(dev);
       await writeRecord(dev, o);
+    } else if (process.argv.includes("--findstore")) {
+      const fi = process.argv.indexOf("--findstore");
+      const a0 = parseInt(process.argv[fi + 1] ?? "0", 16);
+      const b0 = parseInt(process.argv[fi + 2] ?? "ff", 16);
+      await identity(dev);
+      await findStore(dev, isNaN(a0) ? 0 : a0, isNaN(b0) ? 0xff : b0);
     } else if (process.argv.includes("--snapshot")) {
       const si = process.argv.indexOf("--snapshot");
       const lab = (process.argv[si + 1] && !process.argv[si + 1].startsWith("--"))
@@ -3250,8 +3322,17 @@ function parseRecordArgs(argv) {
       const mi = process.argv.indexOf("--mem");
       const ms = mi >= 0 ? parseInt(process.argv[mi + 1] || "0", 16) : 0;
       const ml = mi >= 0 ? parseInt(process.argv[mi + 2] || "1000", 16) : 0;
+      // Extra selectors found by --findstore, e.g. --sel 55,56
+      const xi = process.argv.indexOf("--sel");
+      let sels = DEFAULT_SELECTORS;
+      if (xi >= 0 && process.argv[xi + 1] && !process.argv[xi + 1].startsWith("--")) {
+        const extra = process.argv[xi + 1].split(",")
+          .map((x) => parseInt(x.trim(), x.trim().startsWith("0x") ? 16 : 10))
+          .filter((n) => Number.isInteger(n) && n >= 0 && n <= 255);
+        sels = [...new Set([...DEFAULT_SELECTORS, ...extra])];
+      }
       await identity(dev);
-      await snapshot(dev, lab, ms, ml);
+      await snapshot(dev, lab, ms, ml, sels);
     } else if (process.argv.includes("--compare")) {
       const ci = process.argv.indexOf("--compare");
       const a = process.argv[ci + 1], b = process.argv[ci + 2];
