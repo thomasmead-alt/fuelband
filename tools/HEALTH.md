@@ -98,6 +98,11 @@ totals whenever you like, but you cannot go back and recover last Tuesday.
 If you want a history, the practical answer is to export on a schedule (a daily
 `--export` into a dated file) and build the history going forward.
 
+**Or help crack it.** [`HISTORY.md`](HISTORY.md) has a method and read-only
+tooling for decoding the store differentially — take a snapshot, wear the band,
+take another, and let the tool tell you what moved. It recovers record size and
+sampling interval automatically once it finds timestamps.
+
 ---
 
 ## 3. Getting the CSV into Apple Health

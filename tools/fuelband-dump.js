@@ -21,8 +21,12 @@ let HID;
 try {
   HID = require("node-hid");
 } catch {
-  console.error("node-hid is not installed. Run:  cd tools && npm install");
-  process.exit(1);
+  // --compare only reads JSON files that were captured earlier, so it must keep
+  // working on a machine with no USB library (and no band) installed.
+  if (!process.argv.includes("--compare")) {
+    console.error("node-hid is not installed. Run:  cd tools && npm install");
+    process.exit(1);
+  }
 }
 
 // Commands that legitimately accept --reset as a MODIFIER; the bare --reset
@@ -2164,6 +2168,317 @@ async function readProfile(dev) {
   await rd("clock",  [0x21], decodeBandClock);
 }
 
+// ---- Historic-data research ----------------------------------------------
+// The sample store has never been decoded publicly. We are not going to guess
+// it from a single dump — the way a format like this falls is DIFFERENTIALLY:
+// capture the same regions twice with a known amount of real activity between
+// them, then look at what moved and by how much.
+//
+// Everything here is READ-ONLY. Nothing writes to the band.
+//
+// `--snapshot <label>` captures, with metadata (wall time, band clock, fuel).
+// `--compare a.json b.json` does the analysis offline, so it can be developed
+// and tested without hardware.
+
+// Candidate regions for the sample store, in the region-read framing that the
+// desktop-data region ("P76") uses. If the store is reachable this way, one of
+// these should return something that grows as you wear the band.
+const STORE_REGIONS = [
+  { name: "P76 (desktop data — known)", region: [0x50, 0x37, 0x36] },
+  { name: "P77", region: [0x50, 0x37, 0x37] },
+  { name: "P78", region: [0x50, 0x37, 0x38] },
+  { name: "S76", region: [0x53, 0x37, 0x36] },
+];
+
+async function readRegion(dev, region, maxBlocks = 24) {
+  let tok = [0x00, 0x00, 0x00];
+  const all = [];
+  for (let i = 0; i < maxBlocks; i++) {
+    outWrite(dev, frameSys([0x51, ...region, ...tok]));
+    await delay(120);
+    let d = null;
+    for (const rid of [4, 3, 2, 1]) {
+      const r = tryRead(dev, rid);
+      if (!r.error && r.data && r.data.length > 4) {
+        const b = Array.prototype.slice.call(r.data, 0);
+        if (!d || b.length > d.length) d = b;
+      }
+    }
+    if (!d || d.length < 8) break;
+    const status = d[3];
+    const next = [d[4], d[5], d[6]];
+    all.push(...d.slice(7));
+    if (status !== 0x01) break;
+    const off = (next[0] << 16) | (next[1] << 8) | next[2];
+    if (off === 0 || off <= all.length - d.slice(7).length) break;
+    tok = next;
+  }
+  return all;
+}
+
+async function snapshot(dev, label, memStart, memLen) {
+  const fs = require("fs");
+  console.log("\n=== SNAPSHOT (read-only) ===");
+  const rd = async (cmd, rid = 1) => {
+    outWrite(dev, frameSys(cmd)); await delay(120);
+    return Array.from(tryRead(dev, rid).data || []);
+  };
+  const u24 = (d, at = 3) => (d && d.length >= at + 3)
+    ? ((d[at] << 16) | (d[at + 1] << 8) | d[at + 2]) : null;
+
+  const ver = await readSystem(dev, [0x08]);
+  const ser = await readSystem(dev, [0xe1]);
+  const clockD = await rd([0x21]);
+  const bandClock = (clockD.length >= 7)
+    ? (((clockD[3] << 24) | (clockD[4] << 16) | (clockD[5] << 8) | clockD[6]) >>> 0) : null;
+
+  const snap = {
+    label: label || "snapshot",
+    capturedAt: new Date().toISOString(),
+    capturedAtEpoch: Math.floor(Date.now() / 1000),
+    serial: ser ? ascii(ser).replace(/\0+$/, "").trim() : null,
+    firmware: ver ? ascii(ver).replace(/\.+$/, "") : null,
+    bandClock,
+    bandClockShows: bandClock ? new Date(bandClock * 1000).toISOString().slice(0, 19) : null,
+    counters: {},
+    sampleQuery: null,
+    banks: {},
+    regions: {},
+    memory: null,
+  };
+
+  snap.counters.fuel = u24(await rd([0x24]));
+  snap.counters.x2a = u24(await rd([0x2a]));
+  snap.counters.x2b = u24(await rd([0x2b]));
+  const bat = await rd([0x13]);
+  snap.counters.batteryPct = bat.length >= 4 ? bat[3] : null;
+  console.log(`  fuel ${snap.counters.fuel}   0x2a ${snap.counters.x2a}   0x2b ${snap.counters.x2b}` +
+              `   battery ${snap.counters.batteryPct}%`);
+
+  // 0x17 sample query — 21 bytes of zeros on a factory band. On a band that has
+  // been worn this is the most likely place for a store header.
+  snap.sampleQuery = await rd([0x17]);
+  console.log(`  0x17 sample-query: ${hex(snap.sampleQuery) || "-"}`);
+
+  // Internal flash banks (0x52 0x37 <bank>) — 1..6 are known to answer.
+  for (let bank = 1; bank <= 6; bank++) {
+    const b = await dumpBankQuiet(dev, bank);
+    if (b.length) snap.banks[bank] = hex(b);
+    await delay(60);
+  }
+  console.log(`  banks captured: ${Object.keys(snap.banks).join(", ") || "none"}`);
+
+  for (const r of STORE_REGIONS) {
+    const d = await readRegion(dev, r.region);
+    if (d.length) snap.regions[r.name] = hex(d);
+    console.log(`  region ${r.name.padEnd(28)} ${d.length} bytes`);
+    await delay(80);
+  }
+
+  if (memLen > 0) {
+    console.log(`  sweeping 0x19 from 0x${memStart.toString(16)} for 0x${memLen.toString(16)} bytes…`);
+    snap.memory = { start: memStart, hex: hex(await readMemQuiet(dev, memStart, memLen)) };
+  }
+
+  const file = `snapshot-${(label || "snap").replace(/[^\w.-]/g, "_")}-${snap.capturedAtEpoch}.json`;
+  fs.writeFileSync(file, JSON.stringify(snap, null, 1));
+  console.log(`\n  wrote ${file}`);
+  console.log("  Now wear the band, then take another snapshot and run --compare.");
+  return snap;
+}
+
+// Quiet variants so a snapshot doesn't bury the console.
+async function dumpBankQuiet(dev, bank) {
+  let tok = [0x00, 0x00, 0x00];
+  const all = [];
+  for (let i = 0; i < 16; i++) {
+    outWrite(dev, frameSys([0x52, 0x37, bank, ...tok]));
+    await delay(110);
+    let d = null;
+    for (const rid of [4, 3, 2, 1]) {
+      const r = tryRead(dev, rid);
+      if (!r.error && r.data && r.data.length > 7) {
+        const b = Array.prototype.slice.call(r.data, 0);
+        if (!d || b.length > d.length) d = b;
+      }
+    }
+    if (!d) break;
+    const status = d[3];
+    const next = [d[4], d[5], d[6]];
+    all.push(...d.slice(7));
+    if (status !== 0x01) break;
+    const off = (next[0] << 16) | (next[1] << 8) | next[2];
+    if (off === 0) break;
+    tok = next;
+  }
+  return all;
+}
+
+async function readMemQuiet(dev, start, length) {
+  const out = [];
+  let addr = start;
+  const end = start + length;
+  while (addr < end && out.length < 65536) {
+    outWrite(dev, frameData([0x19, (addr >> 16) & 0xff, (addr >> 8) & 0xff, addr & 0xff]));
+    await delay(40);
+    const r = tryRead(dev, 4);
+    if (!r || !r.data || r.data.length < 8 || r.data[2] !== 0x19) break;
+    const data = Array.prototype.slice.call(r.data, 7);
+    if (!data.length) break;
+    out.push(...data);
+    addr += data.length;
+  }
+  return out;
+}
+
+// ---- Offline analysis -----------------------------------------------------
+// Pure functions over two captured snapshots. No hardware needed, so this half
+// is developed and tested on synthetic data.
+function unhex(s) {
+  if (!s) return [];
+  return s.trim().split(/\s+/).filter(Boolean).map((x) => parseInt(x, 16));
+}
+
+// Where did two byte arrays diverge, and is there a repeating stride to it?
+function analyseBytes(a, b) {
+  const changed = [];
+  const n = Math.max(a.length, b.length);
+  for (let i = 0; i < n; i++) if ((a[i] ?? -1) !== (b[i] ?? -1)) changed.push(i);
+  if (!changed.length) return { changed: 0 };
+
+  // Runs of consecutive changed bytes — these are usually whole fields.
+  const runs = [];
+  let s = changed[0], p = changed[0];
+  for (const i of changed.slice(1)) {
+    if (i === p + 1) { p = i; continue; }
+    runs.push([s, p]); s = i; p = i;
+  }
+  runs.push([s, p]);
+
+  // If records are a fixed size, the gaps between run starts cluster on it.
+  const gaps = {};
+  for (let i = 1; i < runs.length; i++) {
+    const g = runs[i][0] - runs[i - 1][0];
+    if (g > 1 && g < 512) gaps[g] = (gaps[g] || 0) + 1;
+  }
+  const stride = Object.entries(gaps).sort((x, y) => y[1] - x[1])[0];
+
+  return {
+    changed: changed.length,
+    lengthGrewBy: b.length - a.length,
+    firstChange: changed[0],
+    lastChange: changed[changed.length - 1],
+    runs: runs.slice(0, 24),
+    runCount: runs.length,
+    likelyStride: stride && stride[1] >= 3 ? { bytes: +stride[0], seenTimes: stride[1] } : null,
+  };
+}
+
+// Any 4-byte big-endian value that looks like one of our two clock conventions,
+// and lands between the snapshots, is a timestamp — that is the single most
+// useful thing to find in an unknown record.
+function findTimestamps(bytes, loEpoch, hiEpoch) {
+  const hits = [];
+  const pad = 36 * 3600;   // generous: the band's clock may be off
+  for (let i = 0; i + 4 <= bytes.length; i++) {
+    const v = ((bytes[i] << 24) | (bytes[i + 1] << 16) | (bytes[i + 2] << 8) | bytes[i + 3]) >>> 0;
+    if (v >= loEpoch - pad && v <= hiEpoch + pad) {
+      hits.push({ at: i, value: v, asTime: new Date(v * 1000).toISOString().slice(0, 19) });
+      if (hits.length >= 40) break;
+    }
+  }
+  return hits;
+}
+
+function compareSnapshots(fileA, fileB) {
+  const fs = require("fs");
+  const A = JSON.parse(fs.readFileSync(fileA, "utf8"));
+  const B = JSON.parse(fs.readFileSync(fileB, "utf8"));
+
+  console.log("\n=== SNAPSHOT COMPARISON ===");
+  console.log(`  A  ${A.label}  ${A.capturedAt}`);
+  console.log(`  B  ${B.label}  ${B.capturedAt}`);
+  const mins = Math.round((B.capturedAtEpoch - A.capturedAtEpoch) / 60);
+  console.log(`  ${mins} minutes apart` + (A.serial !== B.serial ? "   ** DIFFERENT BANDS **" : ""));
+
+  console.log("\n  counters:");
+  for (const k of Object.keys(A.counters || {})) {
+    const a = A.counters[k], b = B.counters[k];
+    const d = (typeof a === "number" && typeof b === "number") ? b - a : null;
+    console.log(`    ${k.padEnd(12)} ${String(a).padStart(8)} -> ${String(b).padStart(8)}` +
+                (d ? `   (${d > 0 ? "+" : ""}${d})` : "   (no change)"));
+  }
+  const fuelDelta = (B.counters?.fuel ?? 0) - (A.counters?.fuel ?? 0);
+
+  const blocks = [];
+  if (A.sampleQuery || B.sampleQuery)
+    blocks.push(["0x17 sample-query", A.sampleQuery || [], B.sampleQuery || []]);
+  for (const k of new Set([...Object.keys(A.banks || {}), ...Object.keys(B.banks || {})]))
+    blocks.push([`bank ${k}`, unhex(A.banks?.[k]), unhex(B.banks?.[k])]);
+  for (const k of new Set([...Object.keys(A.regions || {}), ...Object.keys(B.regions || {})]))
+    blocks.push([`region ${k}`, unhex(A.regions?.[k]), unhex(B.regions?.[k])]);
+  if (A.memory || B.memory)
+    blocks.push(["0x19 memory", unhex(A.memory?.hex), unhex(B.memory?.hex)]);
+
+  console.log("\n  what moved:");
+  let anything = false;
+  for (const [name, a, b] of blocks) {
+    const r = analyseBytes(a, b);
+    if (!r.changed) { console.log(`    ${name.padEnd(28)} unchanged (${a.length}B)`); continue; }
+    anything = true;
+    console.log(`\n    ${name}  ** ${r.changed} bytes changed **`);
+    console.log(`      length ${a.length} -> ${b.length}` +
+                (r.lengthGrewBy ? `  (grew by ${r.lengthGrewBy})` : ""));
+    console.log(`      changed between offsets ${r.firstChange} and ${r.lastChange}, in ${r.runCount} run(s)`);
+    console.log(`      runs: ${r.runs.map(([s, e]) => s === e ? `${s}` : `${s}-${e}`).join(", ")}` +
+                (r.runCount > 24 ? " …" : ""));
+    if (r.likelyStride)
+      console.log(`      *** looks like fixed records of ${r.likelyStride.bytes} bytes ` +
+                  `(that spacing appears ${r.likelyStride.seenTimes}x) ***`);
+    const ts = findTimestamps(b, A.capturedAtEpoch, B.capturedAtEpoch);
+    if (ts.length) {
+      console.log(`      timestamp-shaped values in B:`);
+      for (const t of ts.slice(0, 8)) console.log(`        @${String(t.at).padStart(5)}  ${t.value}  ${t.asTime}`);
+      if (ts.length > 8) console.log(`        …and ${ts.length - 8} more`);
+
+      // Evenly spaced timestamps are the strongest structural signal there is:
+      // the spacing IS the record size, and the interval between them is the
+      // sampling period. This beats run-gap analysis on an append-only store,
+      // where everything new arrives as one contiguous run.
+      if (ts.length >= 3) {
+        const posGaps = {}, timeGaps = {};
+        for (let i = 1; i < ts.length; i++) {
+          const pg = ts[i].at - ts[i - 1].at;
+          const tg = ts[i].value - ts[i - 1].value;
+          if (pg > 0 && pg <= 512) posGaps[pg] = (posGaps[pg] || 0) + 1;
+          if (tg > 0 && tg <= 86400) timeGaps[tg] = (timeGaps[tg] || 0) + 1;
+        }
+        const top = (o) => Object.entries(o).sort((x, y) => y[1] - x[1])[0];
+        const pg = top(posGaps), tg = top(timeGaps);
+        if (pg && pg[1] >= 2) {
+          console.log(`      *** records are ${pg[0]} bytes apart (${pg[1]}x) — that is the record size ***`);
+          if (r.lengthGrewBy > 0)
+            console.log(`          ${r.lengthGrewBy} new bytes = ${(r.lengthGrewBy / +pg[0]).toFixed(1)} new records`);
+        }
+        if (tg && tg[1] >= 2) {
+          const m = +tg[0] / 60;
+          console.log(`      *** one record every ${+tg[0]}s (${m % 1 ? m.toFixed(1) : m} min) ***`);
+        }
+      }
+    }
+  }
+
+  if (!anything) {
+    console.log("\n  NOTHING changed anywhere.");
+    console.log("  Either the band recorded no activity between these snapshots, or the");
+    console.log("  store is somewhere we are not reading yet. Check the fuel counter moved.");
+  } else if (fuelDelta) {
+    console.log(`\n  Fuel moved by ${fuelDelta}. Look for that number, or a running total`);
+    console.log("  ending in it, inside the changed runs above — that identifies the field.");
+  }
+  console.log("\n  Read-only throughout; nothing was written to the band.");
+}
+
 // ---- Export for Apple Health / anything else ------------------------------
 // Honest scope: this exports the band's CURRENT running totals, not history.
 // The band's per-sample workout store (0x17 sample-query / 0x19 read-memory)
@@ -2828,6 +3143,15 @@ function parseRecordArgs(argv) {
 // --- Main -----------------------------------------------------------------
 
 (async () => {
+  // Offline analysis of already-captured snapshots — no band needed, so handle
+  // it before we try to open one.
+  if (process.argv.includes("--compare")) {
+    const ci = process.argv.indexOf("--compare");
+    const a = process.argv[ci + 1], b = process.argv[ci + 2];
+    if (!a || !b) console.log("Usage: node fuelband-dump.js --compare A.json B.json");
+    else compareSnapshots(a, b);
+    return;
+  }
   const dev = openDevice();
   dev.on("error", (e) => console.error("device error:", e.message));
   try {
@@ -2909,6 +3233,21 @@ function parseRecordArgs(argv) {
       }
       await identity(dev);
       await writeRecord(dev, o);
+    } else if (process.argv.includes("--snapshot")) {
+      const si = process.argv.indexOf("--snapshot");
+      const lab = (process.argv[si + 1] && !process.argv[si + 1].startsWith("--"))
+        ? process.argv[si + 1] : "snap";
+      // Optional 0x19 sweep; off by default because it is slow.
+      const mi = process.argv.indexOf("--mem");
+      const ms = mi >= 0 ? parseInt(process.argv[mi + 1] || "0", 16) : 0;
+      const ml = mi >= 0 ? parseInt(process.argv[mi + 2] || "1000", 16) : 0;
+      await identity(dev);
+      await snapshot(dev, lab, ms, ml);
+    } else if (process.argv.includes("--compare")) {
+      const ci = process.argv.indexOf("--compare");
+      const a = process.argv[ci + 1], b = process.argv[ci + 2];
+      if (!a || !b) console.log("Usage: node fuelband-dump.js --compare A.json B.json");
+      else compareSnapshots(a, b);
     } else if (process.argv.includes("--export")) {
       const ei = process.argv.indexOf("--export");
       const p = process.argv[ei + 1];

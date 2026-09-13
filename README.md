@@ -77,6 +77,7 @@ decoded workout history; the export is current totals only).
 | [`tools/NIKE-CONNECT-ARCHITECTURE.md`](tools/NIKE-CONNECT-ARCHITECTURE.md) | How the original desktop software is built |
 | [`tools/RUNBOOK.md`](tools/RUNBOOK.md) | Ordered, copy-pasteable commands |
 | [`tools/HEALTH.md`](tools/HEALTH.md) | Setting your details, exporting activity, the Apple Health route |
+| [`tools/HISTORY.md`](tools/HISTORY.md) | Decoding the sample store — still unsolved, with the method and tools to try |
 | [`tools/gui/`](tools/gui/) | Button-driven local app for people who'd rather not use a terminal |
 | [`tools/mitm/`](tools/mitm/) | *Not required for activation.* Reference notes on the retired web API |
 
