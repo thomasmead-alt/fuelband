@@ -1745,9 +1745,11 @@ async function getDesktopData(dev, offset = 0) {
   for (const rid of [4, 3, 2, 1]) {
     const r = tryRead(dev, rid);
     if (!r.error && r.data && r.data.length > 3) {
-      const body = Array.prototype.slice.call(r.data, 3); // strip [id,len,07]
+      // Reply is [id, len, 07, status, off:3, data...] — the RECORD starts at
+      // byte 7. Stripping only 3 printed the status and next-offset as if they
+      // were the length header (0x01000038 instead of the real 0x106).
+      const body = Array.prototype.slice.call(r.data, 7);
       console.log(`  feat#${rid}: ${hex(r.data)}`);
-      // first 4 bytes of body = BE length header per the parser
       if (body.length >= 4) {
         const len = ((body[0] << 24) | (body[1] << 16) | (body[2] << 8) | body[3]) >>> 0;
         const uninit = len === 0xffffffff || len === 0;
@@ -2040,7 +2042,10 @@ async function writeRecord(dev, overrides) {
   merged.udi ||= "42424242424243";
   merged.group ||= "1";
   if (merged.imprintState == null) merged.imprintState = 100;
-  merged.profileUpdate ??= Math.floor(Date.now() / 1000);
+  // profile_update_date means "when was this last written", so it is refreshed
+  // on every write. The merge carries other fields forward, but carrying this
+  // one forward would make it permanently stale.
+  if (overrides.profileUpdate == null) merged.profileUpdate = Math.floor(Date.now() / 1000);
   merged.clockAutoSet ??= 1;
 
   const blob = buildCanonicalBlob({
