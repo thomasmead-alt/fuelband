@@ -125,7 +125,7 @@ against full disassembly of individual handlers.
 | `0x13` | battery | — |
 | `0x60` | protocol version | — |
 | `0x0a` | network-processor version | — |
-| `0x21` | **clock** | `[time:4 BE][gmtOffset:4 BE][dstMinutes:1]` |
+| `0x21` | **clock** | `[time:4 BE][gmtOffset:4 BE][dstMinutes:1]` — `time` is **local** wall-clock seconds; the band ignores `gmtOffset` for display (see below) |
 | `0x24` | fuel | — (read) |
 | `0x25` | **goal** | `[type:1][goal:3 BE]` |
 | `0x31` | **24-hour mode** | `[bool:1]` |
@@ -301,6 +301,37 @@ TLV: `tag(2B BE) len(1B) value(len bytes, BE)`. Confirmed tags: `0x0001`
 height values; see the note below), `0x000b` **imprint_state** (u32), `0x0005` email.
 Also serialized: birthdate, screen name, first name, band name, profile update
 date, clock auto set.
+
+### The clock field is LOCAL time, not UTC
+
+Confirmed on hardware, and worth stating plainly because the obvious reading is
+wrong. `0x21` takes `[time:4 BE][gmtOffset:4 BE][dstMinutes:1]`, which looks like
+"UTC plus a zone so the device can localise it". It isn't.
+
+**The band displays the `time` field verbatim and never applies `gmtOffset`.**
+Sending UTC to a band in a UTC+2 zone made it show `08:26` while the wall clock
+read `10:26` — exactly the offset, silently dropped.
+
+So `time` must carry **local wall-clock seconds** (`epoch + offsetSeconds`), and
+`gmtOffset` rides along as metadata the firmware stores but does not use for the
+display. That is presumably how Nike's own client sent it: local time for the
+screen, offset so the server could recover UTC afterwards.
+
+Consequences worth knowing:
+
+- A band written this way has **no idea what time zone it is in**. Travel across
+  zones and it keeps showing the old local time until it is rewritten.
+- `gmtOffset` is a signed value transmitted unsigned: UTC-5 goes out as
+  `0xFFFFB9B0` (`-18000` read as int32).
+- Anything reading the clock back must interpret the number **as UTC** to
+  recover what the band is displaying — treating it as an epoch in local time
+  double-applies the offset.
+
+In this tool every clock write goes through one `clockPayload()` helper for
+exactly that reason: three separate code paths used to build the payload
+independently, and a fix to one would have left the others sending UTC and
+silently undoing it. `--clock-utc` sends the old UTC form if any firmware turns
+out to differ.
 
 ### CRC-16/XMODEM
 

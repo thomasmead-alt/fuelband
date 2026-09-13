@@ -129,6 +129,44 @@ function decodeTs(d) {
 
 const beU32 = (v) => [(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff];
 
+// ---- Clock ----------------------------------------------------------------
+// CONFIRMED ON HARDWARE: the band displays the time field verbatim and ignores
+// the gmtOffset field. Sending UTC to a band in a UTC+2 zone made it show 08:26
+// while the wall clock read 10:26 — exactly the offset, dropped.
+//
+// So the time field carries LOCAL wall-clock seconds (epoch + offset), and
+// gmtOffset rides along as metadata the firmware does not apply to the display.
+// That is presumably how Nike's own client sent it: local time for the screen,
+// offset so the server could recover UTC.
+//
+// Everything that sets the clock goes through here, so the paths cannot drift
+// apart and silently undo each other.
+function clockPayload(when = new Date(), { utc = false } = {}) {
+  const offSec = (-when.getTimezoneOffset()) * 60;      // seconds east of UTC
+  const epoch = Math.floor(when.getTime() / 1000);
+  const field = utc ? epoch : epoch + offSec;
+  return [0x21, ...beU32(field >>> 0), ...beU32(offSec >>> 0), 0x00];
+}
+
+// Render a clock value read back off the band. The stored number is local
+// wall-clock seconds, so it must be read as UTC to show what the band displays.
+function decodeBandClock(d) {
+  if (!d) return "";
+  for (let o = 3; o + 4 <= d.length; o++) {
+    const t = ((d[o] << 24) | (d[o + 1] << 16) | (d[o + 2] << 8) | d[o + 3]) >>> 0;
+    if (t > 1500000000 && t < 2500000000) {
+      const shown = new Date(t * 1000).toISOString().replace("T", " ").slice(0, 16);
+      const wall = new Date();
+      const localNow = Math.floor(wall.getTime() / 1000) + (-wall.getTimezoneOffset()) * 60;
+      const driftMin = Math.round((t - localNow) / 60);
+      const drift = Math.abs(driftMin) < 2 ? "matches this computer"
+                  : `${driftMin > 0 ? "+" : ""}${driftMin} min vs this computer`;
+      return `band shows ${shown}  (${drift})`;
+    }
+  }
+  return "";
+}
+
 // The Nike app sends commands as OUTPUT reports (HidD_SetOutputReport), not
 // feature reports — confirmed by disassembly. node-hid's device.write() does
 // exactly that (buf[0] = report id). State-changing commands (set clock, etc.)
@@ -1350,7 +1388,7 @@ async function fullImprint(dev, doReset) {
   // Update-thread's documented "At setTime (end of Update-thread)").
   const now = Math.floor(Date.now() / 1000);
   const gmt = ((-new Date().getTimezoneOffset()) * 60) >>> 0;
-  outWrite(dev, frameSys([0x21, ...beU32(now), ...beU32(gmt), 0x00]));
+  outWrite(dev, frameSys(clockPayload()));
   await delay(150);
   console.log("  clock: set (final step)");
 
@@ -1641,7 +1679,7 @@ async function provision(dev) {
   const goal = 2000;
 
   const steps = [
-    ["time",            [0x21, ...beU32(now), ...beU32(gmt), 0x00], [0x21]],
+    ["time",            clockPayload(),                             [0x21]],
     ["ts device-init",  [0x42, 0x01, ...beU32(now)],                [0x42, 0x01]],
     ["ts assess-start", [0x42, 0x02, ...beU32(now)],                [0x42, 0x02]],
     ["ts fuel-reset",   [0x42, 0x03, ...beU32(now)],                [0x42, 0x03]],
@@ -2094,18 +2132,9 @@ async function setProfile(dev, opts) {
   // render local time without knowing about time zones.
   if (opts.clock != null) {
     const when = opts.clock instanceof Date ? opts.clock : new Date(opts.clock);
-    const secs = Math.floor(when.getTime() / 1000);
-    const offSec = ((-when.getTimezoneOffset()) * 60) >>> 0;
-    await wr("clock", [0x21, ...beU32(secs), ...beU32(offSec), 0x00], [0x21],
-      (d) => {
-        if (!d) return "";
-        for (let o = 3; o + 4 <= d.length; o++) {
-          const t = ((d[o] << 24) | (d[o + 1] << 16) | (d[o + 2] << 8) | d[o + 3]) >>> 0;
-          if (t > 1500000000 && t < 2500000000) return new Date(t * 1000).toString();
-        }
-        return "";
-      });
-    console.log(`  ${"".padEnd(10)} set to ${when.toString()}`);
+    await wr("clock", clockPayload(when, { utc: !!opts.clockUtc }), [0x21], decodeBandClock);
+    console.log(`  ${"".padEnd(10)} asked for ${when.toString()}`);
+    if (opts.clockUtc) console.log(`  ${"".padEnd(10)} (sent as UTC — escape hatch, not the default)`);
   }
 
   const stuck = results.filter((r) => r.changed).length;
@@ -2132,6 +2161,7 @@ async function readProfile(dev) {
   await rd("metric", [0x32], (d) => d.length >= 4 ? (d[3] ? "metric" : "imperial") : "");
   await rd("24-hour",[0x31], (d) => d.length >= 4 ? (d[3] ? "24-hour" : "12-hour") : "");
   await rd("fuel",   [0x24], (d) => d.length >= 6 ? `${(d[3] << 16) | (d[4] << 8) | d[5]}` : "");
+  await rd("clock",  [0x21], decodeBandClock);
 }
 
 // ---- Export for Apple Health / anything else ------------------------------
@@ -2748,6 +2778,10 @@ function parseProfileArgs(argv) {
       if (isNaN(d.getTime())) return bad("--clock", clock, "expected 'now' or e.g. 2026-09-13T14:30");
       opts.clock = d;
     }
+    // Escape hatch: the band ignores the offset field and shows the time field
+    // as-is, so we send local wall-clock. If some firmware differs, this sends
+    // UTC the way we used to.
+    opts.clockUtc = argv.includes("--clock-utc");
   }
 
   return opts;
@@ -2990,8 +3024,11 @@ function parseRecordArgs(argv) {
       await identity(dev);
       await readConfig(dev);
     } else if (process.argv.includes("--set-clock")) {
+      // Was pointed at the legacy setClock(), which uses opcode 0x31 — that is
+      // 24-hour mode, not the clock (an early misidentification). Route it at
+      // the real one.
       await identity(dev);
-      await setClock(dev);
+      await setProfile(dev, { clock: new Date(), clockUtc: process.argv.includes("--clock-utc") });
     } else if (process.argv.includes("--recon")) {
       await recon(dev);
     } else if (findIdx !== -1) {
