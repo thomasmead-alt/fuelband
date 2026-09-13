@@ -125,7 +125,7 @@ against full disassembly of individual handlers.
 | `0x13` | battery | — |
 | `0x60` | protocol version | — |
 | `0x0a` | network-processor version | — |
-| `0x21` | **clock** | `[time:4 BE][gmtOffset:4 BE][dstMinutes:1]` — `time` is **local** wall-clock seconds; the band ignores `gmtOffset` for display (see below) |
+| `0x21` | **clock** | `[time:4 BE][gmtOffset:4 BE][dstMinutes:1]` — the band displays `time - gmtOffset`. Send local wall-clock and a **zero** offset (see below) |
 | `0x24` | fuel | — (read) |
 | `0x25` | **goal** | `[type:1][goal:3 BE]` |
 | `0x31` | **24-hour mode** | `[bool:1]` |
@@ -302,36 +302,58 @@ height values; see the note below), `0x000b` **imprint_state** (u32), `0x0005` e
 Also serialized: birthdate, screen name, first name, band name, profile update
 date, clock auto set.
 
-### The clock field is LOCAL time, not UTC
+### The clock: the band subtracts the offset you give it
 
-Confirmed on hardware, and worth stating plainly because the obvious reading is
-wrong. `0x21` takes `[time:4 BE][gmtOffset:4 BE][dstMinutes:1]`, which looks like
-"UTC plus a zone so the device can localise it". It isn't.
+Confirmed on hardware, in two steps, and the first conclusion was wrong — so the
+evidence is recorded here rather than just the answer.
 
-**The band displays the `time` field verbatim and never applies `gmtOffset`.**
-Sending UTC to a band in a UTC+2 zone made it show `08:26` while the wall clock
-read `10:26` — exactly the offset, silently dropped.
+`0x21` takes `[time:4 BE][gmtOffset:4 BE][dstMinutes:1]`, which reads like "UTC
+plus a zone, and the device localises it". It does not do that. Two writes to a
+band in **UTC+1** (BST):
 
-So `time` must carry **local wall-clock seconds** (`epoch + offsetSeconds`), and
-`gmtOffset` rides along as metadata the firmware stores but does not use for the
-display. That is presumably how Nike's own client sent it: local time for the
-screen, offset so the server could recover UTC afterwards.
+| sent `time` | sent `gmtOffset` | band displayed | vs local |
+|---|---|---|---|
+| UTC | `+3600` | UTC − 1h | 2 hours slow |
+| UTC + 3600 | `+3600` | UTC | 1 hour slow |
 
-Consequences worth knowing:
+Both fit one rule:
 
-- A band written this way has **no idea what time zone it is in**. Travel across
-  zones and it keeps showing the old local time until it is rewritten.
-- `gmtOffset` is a signed value transmitted unsigned: UTC-5 goes out as
-  `0xFFFFB9B0` (`-18000` read as int32).
-- Anything reading the clock back must interpret the number **as UTC** to
-  recover what the band is displaying — treating it as an epoch in local time
-  double-applies the offset.
+```
+displayed = time - gmtOffset
+```
 
-In this tool every clock write goes through one `clockPayload()` helper for
-exactly that reason: three separate code paths used to build the payload
-independently, and a fix to one would have left the others sending UTC and
-silently undoing it. `--clock-utc` sends the old UTC form if any firmware turns
-out to differ.
+The band **subtracts** the offset. (An earlier revision of this document said it
+*ignored* the offset — that fitted the first observation alone and was wrong. It
+accounted for one hour of the two-hour error, not both.)
+
+**What to send:** local wall-clock seconds in `time`, and **zero** in
+`gmtOffset`.
+
+```
+time      = epoch + utcOffsetSeconds     (i.e. the wall clock, as an epoch)
+gmtOffset = 0
+dstMinutes= 0
+```
+
+Zero is deliberate rather than lazy: `displayed = local - 0 = local` holds
+whether the firmware subtracts the offset or adds it, so the fix does not depend
+on having pinned the sign correctly off two data points. Verified to give the
+right wall clock in UTC+1, UTC+2, UTC−5 and UTC+5:30.
+
+Consequences:
+
+- The band has **no idea what time zone it is in**, and no use for one — it never
+  syncs to anything. Cross a zone and it keeps showing the old local time until
+  it is rewritten.
+- Anything reading the clock back must interpret the number **as UTC** to recover
+  what the band is displaying.
+- `dstMinutes` has never been observed doing anything; we send 0.
+
+In this tool every clock write goes through one `clockPayload()` helper. Three
+separate paths used to build this payload independently, so a fix to one would
+have left the others sending the old form and silently undoing it on the next
+run. `--clock-utc` restores the original UTC-plus-real-offset form for anyone
+whose firmware turns out to differ.
 
 ### CRC-16/XMODEM
 

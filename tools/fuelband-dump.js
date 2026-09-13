@@ -134,22 +134,31 @@ function decodeTs(d) {
 const beU32 = (v) => [(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff];
 
 // ---- Clock ----------------------------------------------------------------
-// CONFIRMED ON HARDWARE: the band displays the time field verbatim and ignores
-// the gmtOffset field. Sending UTC to a band in a UTC+2 zone made it show 08:26
-// while the wall clock read 10:26 — exactly the offset, dropped.
+// Established from two hardware observations on a band in UTC+1 (BST):
 //
-// So the time field carries LOCAL wall-clock seconds (epoch + offset), and
-// gmtOffset rides along as metadata the firmware does not apply to the display.
-// That is presumably how Nike's own client sent it: local time for the screen,
-// offset so the server could recover UTC.
+//   sent time=UTC,       gmtOffset=+3600  ->  band displayed UTC-1h  (2h slow)
+//   sent time=UTC+3600,  gmtOffset=+3600  ->  band displayed UTC     (1h slow)
+//
+// Both fit one rule: displayed = timeField - gmtOffset. The band SUBTRACTS the
+// offset it is given. (An earlier note here said it ignored the offset; that was
+// wrong, and it cost an hour of the error rather than two.)
+//
+// So we send the LOCAL wall-clock in the time field and ZERO in the offset.
+// displayed = local - 0 = local. Sending zero is deliberate: it is correct
+// whether the firmware subtracts the offset or adds it, so it does not depend on
+// having the sign right. The cost is that the band does not know its UTC offset
+// — it has no use for one, since it never syncs to anything.
 //
 // Everything that sets the clock goes through here, so the paths cannot drift
 // apart and silently undo each other.
 function clockPayload(when = new Date(), { utc = false } = {}) {
   const offSec = (-when.getTimezoneOffset()) * 60;      // seconds east of UTC
   const epoch = Math.floor(when.getTime() / 1000);
+  // utc:true restores the original reconstruction (UTC + real offset), kept as
+  // an escape hatch for anyone whose firmware behaves differently.
   const field = utc ? epoch : epoch + offSec;
-  return [0x21, ...beU32(field >>> 0), ...beU32(offSec >>> 0), 0x00];
+  const off = utc ? offSec : 0;
+  return [0x21, ...beU32(field >>> 0), ...beU32(off >>> 0), 0x00];
 }
 
 // Render a clock value read back off the band. The stored number is local
