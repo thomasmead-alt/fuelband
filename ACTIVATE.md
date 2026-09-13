@@ -83,8 +83,10 @@ on it, running entirely on your own machine.
 6. If it says *not activated*, press **Activate — step 1**, wait for it to finish
    (the band restarts partway through — that's normal), then **Activate — step 2**.
 7. Press **Check band** again. It should now say activated.
-8. Fill in **Your details** — height, weight, age, sex, daily goal — and press
-   **Save to band**.
+8. Fill in **Your details** — press **Read from band** first to load what's
+   already on it, then set your weight, height, age, sex, daily fuel target,
+   the clock, and the name you want on the band. Press **Save everything to
+   band**.
 
 That's the whole thing. Skip to [Did it work?](#did-it-work).
 
@@ -174,13 +176,35 @@ node fuelband-dump.js --readprofile          # what's on the band now
 
 node fuelband-dump.js --setprofile \
     --weight 78kg --height 180cm --age 34 --gender M \
-    --goal 3000 --metric 1 --24h 1
+    --goal 3000 --metric 1 --24h 1 --clock now
 ```
 
 - `--weight 78kg` or `--weight 172lb`
 - `--height 180cm`, `--height 71in`, or `--height 5ft10`
 - `--gender M` or `F` · `--goal` daily fuel target
 - `--metric 1|0` (what the band displays) · `--24h 1|0`
+- `--clock now` (this computer's time) or `--clock 2026-09-13T14:30`
+
+**Set the clock.** The band has no way to know the date on its own, and it's what
+timestamps your activity. `--clock now` is the usual answer.
+
+### Put your own name on it
+
+Separately from the settings above, the band holds a small record with your name
+and the band's name in it. Out of the box our activation writes placeholders
+(`user`, `Fuel`) — replace them with your own:
+
+```sh
+node fuelband-dump.js --readrecord           # what the record holds now
+
+node fuelband-dump.js --writerecord \
+    --name Tom --bandname "Tom's Band" \
+    --email you@example.com --birthdate 1990-04-12
+```
+
+Anything you don't name is carried over from what's already on the band, so
+changing one field never blanks the rest — and a band that was activated keeps
+its own identity fields.
 
 Every field is read back off the band straight after it's written, so the output
 tells you what actually stuck. A value that already matched what you typed shows

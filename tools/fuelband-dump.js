@@ -1875,6 +1875,155 @@ async function dumpBank(dev, bank, maxBlocks = 64) {
   return all;
 }
 
+// ---- Record parse / edit / write ------------------------------------------
+// Decode the on-band settings record into named fields, so it can be shown in a
+// form, edited, and written back. Layout: [len:4 BE][DIN:48][UDI:48][group:48]
+// [TLVs][CRC:2]. The firmware's own loop stops when fewer than 4 bytes remain or
+// the next tag byte is 0xFF, so this mirrors that.
+const TLV_NAMES = {
+  0x01: "weightUnits", 0x02: "heightUnits", 0x05: "email", 0x06: "birthdate",
+  0x07: "screenName", 0x0b: "imprintState", 0x0c: "firstName",
+  0x0d: "profileUpdate", 0x0e: "clockAutoSet", 0x0f: "bandName",
+};
+const TLV_TAGS = Object.fromEntries(Object.entries(TLV_NAMES).map(([t, n]) => [n, +t]));
+
+function parseRecord(bytes) {
+  const out = { ok: false, receivedLength: bytes ? bytes.length : 0,
+                fields: {}, passthrough: [], warnings: [] };
+  if (!bytes || bytes.length < 150) { out.reason = "too short to be a record"; return out; }
+
+  out.declaredTotal = ((bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3]) >>> 0;
+  if (out.declaredTotal < 150 || out.declaredTotal > bytes.length + 64) {
+    out.reason = `implausible length header (${out.declaredTotal})`;
+    return out;
+  }
+  // The band pads its reply out to a block boundary; trust the declared length.
+  const end = Math.min(out.declaredTotal, bytes.length);
+
+  const str48 = (at) => {
+    let s = "";
+    for (let i = at; i < at + 48 && i < bytes.length; i++) {
+      if (!bytes[i]) break;
+      s += String.fromCharCode(bytes[i]);
+    }
+    return s;
+  };
+  out.din = str48(4); out.udi = str48(52); out.group = str48(100);
+
+  let i = 148;
+  while (i + 3 <= end - 2 && bytes[i] !== 0xff) {
+    const tag = (bytes[i] << 8) | bytes[i + 1];
+    const len = bytes[i + 2];
+    const val = bytes.slice(i + 3, i + 3 + len);
+    if (i + 3 + len > end - 2) { out.warnings.push(`tag 0x${tag.toString(16)} runs past the record`); break; }
+    const name = TLV_NAMES[tag];
+    if (!name) {
+      out.passthrough.push({ tag, hex: hex(val) });
+    } else if (tag === 0x0b) {
+      if (len === 4) out.fields.imprintState = ((val[0] << 24) | (val[1] << 16) | (val[2] << 8) | val[3]) >>> 0;
+      else out.warnings.push(`imprintState has len ${len}, not 4 — the firmware skips it`);
+    } else if (tag === 0x0d) {
+      if (len === 8) { let n = 0n; for (const b of val) n = (n << 8n) | BigInt(b); out.fields.profileUpdate = Number(n); }
+      else out.warnings.push(`profileUpdate has len ${len}, not 8 — the firmware skips it`);
+    } else if (tag === 0x01 || tag === 0x02 || tag === 0x0e) {
+      if (len === 1) out.fields[name] = val[0];
+      else out.warnings.push(`${name} has len ${len}, not 1 — the firmware skips it`);
+    } else {
+      out.fields[name] = val.map((b) => String.fromCharCode(b)).join("");
+    }
+    i += len + 3;
+  }
+
+  const payload = bytes.slice(4, end - 2);
+  const stored = (bytes[end - 2] << 8) | bytes[end - 1];
+  out.crcStored = stored;
+  out.crcComputed = crc16xmodem(payload);
+  out.crcOk = out.crcStored === out.crcComputed;
+  if (!out.crcOk) out.warnings.push("CRC mismatch — the record may be truncated or corrupt");
+  out.ok = true;
+  return out;
+}
+
+async function readRecord(dev, asJson) {
+  const raw = await readDesktopFull(dev);
+  const p = parseRecord(raw);
+  if (asJson) {
+    // Sentinels so a caller can lift the JSON out of surrounding chatter.
+    console.log("<<<RECORD-JSON");
+    console.log(JSON.stringify(p));
+    console.log("RECORD-JSON>>>");
+    return p;
+  }
+  console.log("\n=== SETTINGS RECORD ON THE BAND ===");
+  if (!p.ok) {
+    console.log(`  unreadable: ${p.reason} (${p.receivedLength} bytes back)`);
+    console.log("  A factory-blank band has no record yet — that's expected.");
+    return p;
+  }
+  console.log(`  length ${p.declaredTotal}   CRC ${p.crcOk ? "ok" : "MISMATCH"}`);
+  console.log(`  DIN        ${p.din || "(empty)"}`);
+  console.log(`  UDI        ${p.udi || "(empty)"}`);
+  console.log(`  group      ${p.group || "(empty)"}`);
+  for (const [k, v] of Object.entries(p.fields)) console.log(`  ${k.padEnd(14)} ${v}`);
+  for (const u of p.passthrough) console.log(`  (unknown 0x${u.tag.toString(16).padStart(4, "0")})  ${u.hex}`);
+  for (const w of p.warnings) console.log(`  ! ${w}`);
+  return p;
+}
+
+// Write an edited record. Anything not overridden is carried over from what the
+// band already holds, so editing one field never silently blanks the rest — and
+// a band that was activated keeps its own DIN and UDI.
+async function writeRecord(dev, overrides) {
+  console.log("\n=== WRITE SETTINGS RECORD ===");
+  const current = parseRecord(await readDesktopFull(dev));
+
+  const base = current.ok
+    ? { din: current.din, udi: current.udi, group: current.group, ...current.fields }
+    : {};
+  if (current.ok) console.log(`  read existing record (${current.declaredTotal}B, CRC ${current.crcOk ? "ok" : "bad"})`);
+  else console.log(`  no existing record (${current.reason}) — starting from defaults`);
+
+  const merged = { ...base, ...overrides };
+  // Defaults only where the band gave us nothing and the caller didn't say.
+  merged.din ||= "42424242424242";
+  merged.udi ||= "42424242424243";
+  merged.group ||= "1";
+  if (merged.imprintState == null) merged.imprintState = 100;
+  merged.profileUpdate ??= Math.floor(Date.now() / 1000);
+  merged.clockAutoSet ??= 1;
+
+  const blob = buildCanonicalBlob({
+    din: merged.din, udi: merged.udi, group: merged.group,
+    imprintState: merged.imprintState,
+    metricWeight: merged.weightUnits ?? 0, metricHeight: merged.heightUnits ?? 0,
+    email: merged.email ?? "", birthdate: merged.birthdate ?? "",
+    screenName: merged.screenName ?? "", firstName: merged.firstName ?? "",
+    bandName: merged.bandName ?? "",
+    profileUpdate: merged.profileUpdate, clockAutoSet: merged.clockAutoSet,
+  });
+
+  for (const [k, v] of Object.entries(overrides)) console.log(`  set ${k.padEnd(14)} ${v}`);
+  console.log(`  record is ${blob.length} bytes`);
+
+  const x = new FuelBandTransfer(dev, { verbose: false });
+  await x.send(blob);
+  await delay(200);
+
+  const after = parseRecord(await readDesktopFull(dev));
+  if (!after.ok) { console.log(`  read-back failed: ${after.reason}`); return false; }
+  console.log(`  read back ${after.declaredTotal}B, CRC ${after.crcOk ? "ok" : "MISMATCH"}`);
+
+  let bad = 0;
+  for (const [k, want] of Object.entries(overrides)) {
+    const got = k === "din" || k === "udi" || k === "group" ? after[k] : after.fields[k];
+    const same = String(got) === String(want);
+    if (!same) bad++;
+    console.log(`    ${same ? "ok " : "NO "} ${k.padEnd(14)} wanted ${JSON.stringify(want)}, band says ${JSON.stringify(got)}`);
+  }
+  console.log(bad === 0 ? "\n  All values stuck." : `\n  ${bad} value(s) did not stick — see above.`);
+  return bad === 0;
+}
+
 // ---- Profile setters ------------------------------------------------------
 // Encodings taken from the plugin's own scaling constants, not guessed:
 //   weight: kg * 2.20462262 * 10  -> u16   (tenths of a POUND)
@@ -1939,6 +2088,25 @@ async function setProfile(dev, opts) {
   if (opts.is24h != null)
     await wr("24-hour", [0x31, opts.is24h ? 1 : 0], [0x31],
       (d) => (d && d.length >= 4) ? (d[3] ? "24-hour" : "12-hour") : "");
+
+  // Clock last — matching the order the original software used. `when` is a JS
+  // Date; the band wants UTC seconds plus the local offset in seconds, so it can
+  // render local time without knowing about time zones.
+  if (opts.clock != null) {
+    const when = opts.clock instanceof Date ? opts.clock : new Date(opts.clock);
+    const secs = Math.floor(when.getTime() / 1000);
+    const offSec = ((-when.getTimezoneOffset()) * 60) >>> 0;
+    await wr("clock", [0x21, ...beU32(secs), ...beU32(offSec), 0x00], [0x21],
+      (d) => {
+        if (!d) return "";
+        for (let o = 3; o + 4 <= d.length; o++) {
+          const t = ((d[o] << 24) | (d[o + 1] << 16) | (d[o + 2] << 8) | d[o + 3]) >>> 0;
+          if (t > 1500000000 && t < 2500000000) return new Date(t * 1000).toString();
+        }
+        return "";
+      });
+    console.log(`  ${"".padEnd(10)} set to ${when.toString()}`);
+  }
 
   const stuck = results.filter((r) => r.changed).length;
   console.log(`\n  ${stuck}/${results.length} value(s) changed on the band.`);
@@ -2569,7 +2737,58 @@ function parseProfileArgs(argv) {
     opts.is24h = h24.trim() === "1";
   }
 
+  // --clock now   (this computer's time, the usual case)
+  // --clock 2026-09-13T14:30   (anything Date can parse)
+  const clock = get("--clock");
+  if (clock != null) {
+    const s = clock.trim();
+    if (/^now$/i.test(s)) opts.clock = new Date();
+    else {
+      const d = new Date(s);
+      if (isNaN(d.getTime())) return bad("--clock", clock, "expected 'now' or e.g. 2026-09-13T14:30");
+      opts.clock = d;
+    }
+  }
+
   return opts;
+}
+
+// Named arguments for --writerecord. Only what the caller names is changed;
+// everything else is carried over from the record already on the band.
+function parseRecordArgs(argv) {
+  const get = (name) => {
+    const i = argv.indexOf(name);
+    return (i >= 0 && argv[i + 1] && !argv[i + 1].startsWith("--")) ? argv[i + 1] : null;
+  };
+  const o = {};
+  for (const [flag, key] of [["--name", "firstName"], ["--bandname", "bandName"],
+                             ["--email", "email"], ["--birthdate", "birthdate"],
+                             ["--screenname", "screenName"], ["--din", "din"],
+                             ["--udi", "udi"], ["--group", "group"]]) {
+    const v = get(flag);
+    if (v != null) o[key] = v;
+  }
+  for (const [flag, key] of [["--weightunits", "weightUnits"], ["--heightunits", "heightUnits"],
+                             ["--clockauto", "clockAutoSet"]]) {
+    const v = get(flag);
+    if (v != null) {
+      if (!/^[01]$/.test(v.trim())) {
+        console.log(`Bad value for ${flag}: "${v}" — expected 0 or 1. Nothing was written.`);
+        return null;
+      }
+      o[key] = +v.trim();
+    }
+  }
+  const st = get("--imprintstate");
+  if (st != null) {
+    const n = parseInt(st, 10);
+    if (!(n >= 0 && n <= 100)) {
+      console.log(`Bad value for --imprintstate: "${st}" — expected 0-100. Nothing was written.`);
+      return null;
+    }
+    o.imprintState = n;
+  }
+  return o;
 }
 
 // --- Main -----------------------------------------------------------------
@@ -2642,6 +2861,20 @@ function parseProfileArgs(argv) {
     } else if (process.argv.includes("--provision")) {
       await identity(dev);
       await provision(dev);
+    } else if (process.argv.includes("--readrecord")) {
+      const asJson = process.argv.includes("--json");
+      if (!asJson) await identity(dev);
+      await readRecord(dev, asJson);
+    } else if (process.argv.includes("--writerecord")) {
+      const o = parseRecordArgs(process.argv);
+      if (o == null) return;
+      if (Object.keys(o).length === 0) {
+        console.log("Nothing to change. Example:");
+        console.log("  node fuelband-dump.js --writerecord --name Tom --bandname \"Tom's Band\"");
+        return;
+      }
+      await identity(dev);
+      await writeRecord(dev, o);
     } else if (process.argv.includes("--export")) {
       const ei = process.argv.indexOf("--export");
       const p = process.argv[ei + 1];

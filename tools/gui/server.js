@@ -20,6 +20,9 @@ const DIR = __dirname;
 const TOOL = path.join(DIR, "..", "fuelband-dump.js");
 
 // Only these may be run. No arbitrary flags from the browser.
+// `build` actions take user input; everything it produces is re-derived from
+// values this file parses itself, so nothing from the browser reaches the
+// command line as a string. `seq` runs several commands in order.
 const ACTIONS = {
   status:      { args: ["--checklist"],   label: "Check band status" },
   diagnose:    { args: ["--extrareads"],  label: "Read diagnostics" },
@@ -27,13 +30,13 @@ const ACTIONS = {
   activate2:   { args: ["--provision"],   label: "Activate step 2" },
   settings:    { args: ["--getdesktop"],  label: "Read settings record" },
   readprofile: { args: ["--readprofile"], label: "Read your details" },
-  setprofile:  { build: buildProfileArgs,  label: "Save your details" },
+  readrecord:  { args: ["--readrecord", "--json"], label: "Read what's on the band" },
+  setprofile:  { build: (q) => [buildProfileArgs(q)], label: "Save your details" },
+  setrecord:   { build: (q) => [buildRecordArgs(q)],  label: "Save your name" },
+  saveall:     { build: buildSaveAll, label: "Save everything" },
   export:      { args: ["--export", "fuelband-export"], label: "Export activity" },
 };
 
-// The only action that takes user input. Every value is re-derived from a
-// number we parse ourselves — nothing the browser sends is passed through as a
-// string, so there is no way to smuggle an extra flag into the command line.
 function buildProfileArgs(q) {
   const args = ["--setprofile"];
   const num = (k, lo, hi) => {
@@ -59,17 +62,73 @@ function buildProfileArgs(q) {
     const v = q.get(k);
     if (v === "0" || v === "1") args.push(flag, v);
   }
+
+  // Clock: "now" uses this computer's time. An explicit local datetime is
+  // re-formatted from parsed components, never passed through as typed.
+  const clock = q.get("clock");
+  if (clock === "now") args.push("--clock", "now");
+  else if (clock) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(clock);
+    if (!m) throw new Error("date/time not understood");
+    const d = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]);
+    if (isNaN(d.getTime())) throw new Error("date/time not valid");
+    const p = (n) => String(n).padStart(2, "0");
+    args.push("--clock", `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}` +
+                         `T${p(d.getHours())}:${p(d.getMinutes())}`);
+  }
+
   if (args.length === 1) throw new Error("nothing to set");
   return args;
+}
+
+// Text that goes into the band's settings record. Stripped to printable ASCII
+// and length-capped — the record is fixed-width in places and the band's own
+// parser is unforgiving about lengths.
+function buildRecordArgs(q) {
+  const args = ["--writerecord"];
+  const text = (key, flag, max) => {
+    const v = q.get(key);
+    if (v == null || v === "") return;
+    // Strip control characters, then leading dashes: the CLI treats a value
+    // starting with "--" as a missing argument and would silently ignore it.
+    const clean = v.replace(/[^\x20-\x7e]/g, "").replace(/^-+/, "").trim().slice(0, max);
+    if (clean) args.push(flag, clean);
+  };
+  text("firstName", "--name", 32);
+  text("bandName", "--bandname", 32);
+  text("email", "--email", 64);
+
+  const bd = q.get("birthdate");
+  if (bd) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(bd)) throw new Error("birthdate must be YYYY-MM-DD");
+    args.push("--birthdate", bd);
+  }
+  for (const [k, flag] of [["weightUnits", "--weightunits"], ["heightUnits", "--heightunits"]]) {
+    const v = q.get(k);
+    if (v === "0" || v === "1") args.push(flag, v);
+  }
+  if (args.length === 1) throw new Error("nothing to set");
+  return args;
+}
+
+// Both halves, in order: the settings record first, then the live options and
+// the clock — matching the order the original software used.
+function buildSaveAll(q) {
+  const out = [];
+  for (const fn of [buildRecordArgs, buildProfileArgs]) {
+    try { out.push(fn(q)); } catch (e) { if (e.message !== "nothing to set") throw e; }
+  }
+  if (!out.length) throw new Error("nothing to set");
+  return out;
 }
 
 function runAction(key, res, query) {
   const action = ACTIONS[key];
   if (!action) { res.writeHead(400); return res.end("unknown action"); }
 
-  let argv;
+  let runs;
   try {
-    argv = action.build ? action.build(query) : action.args;
+    runs = action.build ? action.build(query) : [action.args];
   } catch (e) {
     res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
     return res.end(`Could not use those values: ${e.message}\n`);
@@ -81,14 +140,22 @@ function runAction(key, res, query) {
     "X-Accel-Buffering": "no",
   });
 
-  const child = spawn(process.execPath, [TOOL, ...argv], { cwd: path.join(DIR, "..") });
-  child.stdout.on("data", (d) => res.write(d));
-  child.stderr.on("data", (d) => res.write(d));
-  child.on("error", (e) => { res.write(`\n[error] ${e.message}\n`); res.end(); });
-  child.on("close", (code) => {
-    res.write(`\n\n--- finished (exit ${code}) ---\n`);
-    res.end();
-  });
+  const cwd = path.join(DIR, "..");
+  let i = 0;
+  const next = () => {
+    if (i >= runs.length) { res.write(`\n\n--- finished ---\n`); return res.end(); }
+    const argv = runs[i++];
+    const child = spawn(process.execPath, [TOOL, ...argv], { cwd });
+    child.stdout.on("data", (d) => res.write(d));
+    child.stderr.on("data", (d) => res.write(d));
+    child.on("error", (e) => { res.write(`\n[error] ${e.message}\n`); res.end(); });
+    child.on("close", (code) => {
+      if (runs.length > 1) res.write(`\n--- step ${i} of ${runs.length} done (exit ${code}) ---\n`);
+      if (code !== 0) { res.write(`\n--- stopped: exit ${code} ---\n`); return res.end(); }
+      next();
+    });
+  };
+  next();
 }
 
 const server = http.createServer((req, res) => {

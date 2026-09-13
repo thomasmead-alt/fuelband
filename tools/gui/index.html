@@ -44,6 +44,10 @@
   details { margin-top: 10px; }
   summary { cursor: pointer; color: var(--muted); font-size: .9rem; }
   .hint { font-size:.85rem; color:var(--muted); margin-top:10px; }
+  .grouphead { font:600 11.5px/1 "IBM Plex Mono", ui-monospace, monospace; letter-spacing:.11em;
+               text-transform:uppercase; color:var(--muted); margin:22px 0 12px;
+               padding-bottom:7px; border-bottom:1px solid var(--line); }
+  .grouphead:first-child { margin-top:4px; }
   .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:14px; }
   .grid label { display:flex; flex-direction:column; gap:5px; font-size:.9rem;
                 font-weight:600; color:var(--ink); }
@@ -100,49 +104,84 @@
 
   <div class="card">
     <h2>3. Your details</h2>
-    <p>The band uses your height, weight, age and sex to work out how much fuel
-    you've earned. Fill in what you know and press Save — leave anything blank
-    to keep what's already on the band.</p>
-    <form id="profile" class="grid">
-      <label>Weight
-        <span class="pair">
-          <input name="weight" type="number" step="0.1" min="1" placeholder="e.g. 78">
-          <select name="weightUnit"><option value="kg">kg</option><option value="lb">lb</option></select>
-        </span>
-      </label>
-      <label>Height
-        <span class="pair">
-          <input name="height" type="number" step="0.1" min="1" placeholder="e.g. 180">
-          <select name="heightUnit"><option value="cm">cm</option><option value="in">inches</option></select>
-        </span>
-      </label>
-      <label>Age <input name="age" type="number" min="5" max="120" placeholder="years"></label>
-      <label>Sex
-        <select name="gender">
-          <option value="">— leave as is —</option>
-          <option value="M">Male</option><option value="F">Female</option>
-        </select>
-      </label>
-      <label>Daily fuel goal <input name="goal" type="number" min="0" placeholder="e.g. 3000"></label>
-      <label>Units shown on band
-        <select name="metric">
-          <option value="">— leave as is —</option>
-          <option value="1">Metric (kg, cm)</option><option value="0">Imperial (lb, in)</option>
-        </select>
-      </label>
-      <label>Clock
-        <select name="h24">
-          <option value="">— leave as is —</option>
-          <option value="0">12-hour</option><option value="1">24-hour</option>
-        </select>
-      </label>
+    <p>Everything the band stores about you. Press <strong>Read from band</strong> to
+    fill this in with what's on it now, change what you like, then save. Anything
+    left blank is left alone.</p>
+
+    <form id="profile">
+      <h3 class="grouphead">Measurements</h3>
+      <div class="grid">
+        <label>Weight
+          <span class="pair">
+            <input name="weight" type="number" step="0.1" min="1" placeholder="e.g. 78">
+            <select name="weightUnit"><option value="kg">kg</option><option value="lb">lb</option></select>
+          </span>
+        </label>
+        <label>Height
+          <span class="pair">
+            <input name="height" type="number" step="0.1" min="1" placeholder="e.g. 180">
+            <select name="heightUnit"><option value="cm">cm</option><option value="in">inches</option></select>
+          </span>
+        </label>
+        <label>Age <input name="age" type="number" min="5" max="120" placeholder="years"></label>
+        <label>Sex
+          <select name="gender">
+            <option value="">— leave as is —</option>
+            <option value="M">Male</option><option value="F">Female</option>
+          </select>
+        </label>
+      </div>
+
+      <h3 class="grouphead">Goal &amp; display</h3>
+      <div class="grid">
+        <label>Daily fuel target <input name="goal" type="number" min="0" placeholder="e.g. 3000"></label>
+        <label>Units shown on band
+          <select name="metric">
+            <option value="">— leave as is —</option>
+            <option value="1">Metric (kg, cm)</option><option value="0">Imperial (lb, in)</option>
+          </select>
+        </label>
+        <label>Clock format
+          <select name="h24">
+            <option value="">— leave as is —</option>
+            <option value="0">12-hour</option><option value="1">24-hour</option>
+          </select>
+        </label>
+      </div>
+
+      <h3 class="grouphead">Date &amp; time</h3>
+      <div class="grid">
+        <label>Set the band's clock
+          <select name="clockMode">
+            <option value="now">To this computer's time (recommended)</option>
+            <option value="custom">To a specific date and time…</option>
+            <option value="">Leave the clock alone</option>
+          </select>
+        </label>
+        <label id="clockCustomWrap" hidden>Date and time
+          <input name="clockCustom" type="datetime-local">
+        </label>
+      </div>
+      <p class="hint" style="margin-top:8px">The band has no way to know the date on
+      its own, so this is worth setting — it's what timestamps your activity.</p>
+
+      <h3 class="grouphead">Name on the band</h3>
+      <div class="grid">
+        <label>Your first name <input name="firstName" maxlength="32" placeholder="e.g. Tom"></label>
+        <label>Band name <input name="bandName" maxlength="32" placeholder="e.g. Tom's Band"></label>
+        <label>Email <input name="email" type="email" maxlength="64" placeholder="optional"></label>
+        <label>Date of birth <input name="birthdate" type="date"></label>
+      </div>
     </form>
-    <div class="row" style="margin-top:14px">
-      <button data-action="setprofile">Save to band</button>
-      <button class="secondary" data-action="readprofile">Read what's on the band</button>
+
+    <div class="row" style="margin-top:18px">
+      <button data-action="saveall">Save everything to band</button>
+      <button class="secondary" data-action="readrecord">Read from band</button>
     </div>
-    <p class="hint">Every value is read back off the band after it's written, so
-    the output below shows what actually stuck.</p>
+    <p id="pverdict" class="result" hidden></p>
+    <p class="hint">Every value is read back off the band after it's written, so the
+    output below shows what actually stuck. A value that already matched what you
+    typed shows as <em>unchanged</em> — that's normal, not a failure.</p>
   </div>
 
   <div class="card">
@@ -200,13 +239,17 @@ function interpret(text, action) {
                   "usually needs extra permissions; on a Mac, try a different USB port."];
   if (/no fuelband found|could not open|device not found/i.test(text))
     return ["no", "Band not found — check the cable, then unplug and replug it."];
-  if (action === "setprofile") {
-    const s = text.match(/(\d+)\/(\d+) value\(s\) changed/);
-    if (!s) return ["no", "Couldn't save — check the output below."];
-    return s[2] === "0"
-      ? ["no", "Nothing was sent to the band."]
-      : ["ok", `Saved. ${s[1]} of ${s[2]} value(s) changed on the band` +
-               `${s[1] === s[2] ? "." : " — the rest already matched what you entered."}`];
+  if (action === "setprofile" || action === "setrecord" || action === "saveall") {
+    const stuck = /All values stuck\./.test(text);
+    const failed = text.match(/(\d+) value\(s\) did not stick/);
+    const opts = text.match(/(\d+)\/(\d+) value\(s\) changed/);
+    if (failed) return ["no", `${failed[1]} value(s) didn't stick — check the output below.`];
+    const parts = [];
+    if (stuck) parts.push("your name and record saved");
+    if (opts) parts.push(`${opts[1]} of ${opts[2]} setting(s) changed`);
+    if (!parts.length) return ["no", "Couldn't confirm the save — check the output below."];
+    return ["ok", "Saved: " + parts.join(", ") +
+                  ". Values already matching what you typed show as unchanged."];
   }
   if (action === "export")
     return /wrote .*\.json/.test(text)
@@ -221,11 +264,11 @@ function interpret(text, action) {
   return [null, null];
 }
 
-// Convert the form to the metric values the server expects. Anything left blank
-// is simply not sent, so the band keeps whatever it already had.
+// Convert the form to the values the server expects. Anything left blank is
+// simply not sent, so the band keeps whatever it already had.
 function profileQuery() {
   const f = document.getElementById("profile");
-  const v = (n) => f.elements[n].value.trim();
+  const v = (n) => (f.elements[n] ? f.elements[n].value.trim() : "");
   const q = new URLSearchParams();
   if (v("weight")) {
     const n = parseFloat(v("weight"));
@@ -235,13 +278,51 @@ function profileQuery() {
     const n = parseFloat(v("height"));
     q.set("heightCm", (f.elements.heightUnit.value === "in" ? n * 2.54 : n).toFixed(1));
   }
-  for (const k of ["age", "goal", "gender", "metric", "h24"]) if (v(k)) q.set(k, v(k));
+  for (const k of ["age", "goal", "gender", "metric", "h24",
+                   "firstName", "bandName", "email", "birthdate"]) {
+    if (v(k)) q.set(k, v(k));
+  }
+  const mode = v("clockMode");
+  if (mode === "now") q.set("clock", "now");
+  else if (mode === "custom" && v("clockCustom")) q.set("clock", v("clockCustom"));
   return q;
+}
+
+// Show the custom date/time box only when it's wanted.
+const clockMode = document.querySelector('[name="clockMode"]');
+const clockWrap = document.getElementById("clockCustomWrap");
+function syncClockMode() { clockWrap.hidden = clockMode.value !== "custom"; }
+clockMode.addEventListener("change", syncClockMode);
+syncClockMode();
+
+// Fill the form from the record the band is holding.
+function prefill(text) {
+  const m = text.match(/<<<RECORD-JSON\s*([\s\S]*?)\s*RECORD-JSON>>>/);
+  if (!m) return null;
+  let rec;
+  try { rec = JSON.parse(m[1]); } catch { return null; }
+  if (!rec.ok) return "This band has no settings record yet — fill the form in and save.";
+
+  const f = document.getElementById("profile");
+  const set = (name, val) => {
+    if (val == null || val === "" || !f.elements[name]) return;
+    f.elements[name].value = val;
+  };
+  set("firstName", rec.fields.firstName);
+  set("bandName", rec.fields.bandName);
+  set("email", rec.fields.email);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(rec.fields.birthdate || "")) set("birthdate", rec.fields.birthdate);
+
+  const filled = ["firstName", "bandName", "email", "birthdate"]
+    .filter((k) => rec.fields[k]).length;
+  return filled
+    ? `Filled in ${filled} value${filled > 1 ? "s" : ""} from the band. Change what you like, then save.`
+    : "The band's record is empty — fill the form in and save.";
 }
 
 async function run(action) {
   let query = "";
-  if (action === "setprofile") {
+  if (action === "saveall" || action === "setprofile" || action === "setrecord") {
     const q = profileQuery();
     if ([...q.keys()].length === 0) {
       verdict.textContent = "Nothing filled in yet — enter at least one value above.";
@@ -253,6 +334,7 @@ async function run(action) {
   }
   setBusy(true);
   verdict.hidden = true;
+  document.getElementById("pverdict").hidden = true;
   document.querySelectorAll("a.dl").forEach((a) => a.hidden = true);
   out.textContent = "Working… (this can take a minute; don't unplug the band)\n\n";
   try {
@@ -270,6 +352,12 @@ async function run(action) {
     }
     if (action === "export" && /wrote .*\.json/.test(all))
       document.querySelectorAll("a.dl").forEach((a) => a.hidden = false);
+    if (action === "readrecord") {
+      const msg = prefill(all);
+      const p = document.getElementById("pverdict");
+      if (msg) { p.textContent = msg; p.className = "result ok"; p.hidden = false; }
+      return;                       // `finally` clears the busy state
+    }
     const [kind, msg] = interpret(all, action);
     if (msg) {
       verdict.textContent = msg;
