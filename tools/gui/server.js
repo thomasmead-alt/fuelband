@@ -29,6 +29,8 @@ const ACTIONS = {
   activate1:   { args: ["--autoimprint"], label: "Activate step 1" },
   activate2:   { args: ["--provision"],   label: "Activate step 2" },
   settings:    { args: ["--getdesktop"],  label: "Read settings record" },
+  storereport: { args: ["--storereport"], label: "Workout-store report" },
+  findstore:   { args: ["--findstore"],   label: "Selector sweep" },
   readprofile: { args: ["--readprofile"], label: "Read your details" },
   readrecord:  { args: ["--readrecord", "--json"], label: "Read what's on the band" },
   setprofile:  { build: (q) => [buildProfileArgs(q)], label: "Save your details" },

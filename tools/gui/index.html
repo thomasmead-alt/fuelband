@@ -4,68 +4,164 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FuelBand Revival</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Barlow:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
 <style>
+  /* Themed after the band itself: a black rubber strap with a dot-matrix LED
+     display under the surface, and a 100-LED bar that runs red through amber to
+     green as you close on your goal. That bar is reused here as the app's own
+     status indicator, so the metaphor carries information rather than decorating.
+     The device panel stays dark in both themes -- it is a piece of hardware --
+     while the page around it follows the viewer. */
   :root {
-    --bg:#f7f7f8; --card:#fff; --ink:#1a1a1c; --muted:#6b6b73;
-    --line:#e3e3e8; --accent:#1f6feb; --ok:#12805c; --warn:#8a5a00;
+    --page:#f2f3f0; --card:#ffffff; --ink:#16181a; --muted:#5f6670;
+    --line:#dfe2dd; --sunk:#0c0d10;
+    --device:#0b0c0e; --device-2:#16181c; --device-line:#24272c;
+    --led-red:#ff4438; --led-amber:#ffae00; --led-green:#2fb463;
+    --led-off:#2a2e34;
+    --volt:#8a9e00; --volt-ink:#ffffff;
+    --ok:#1b7a45; --warn:#8a5a00;
+    --shadow:0 1px 2px rgba(12,13,16,.06), 0 10px 30px -18px rgba(12,13,16,.45);
   }
   @media (prefers-color-scheme: dark) {
-    :root { --bg:#16161a; --card:#1e1e24; --ink:#f0f0f2; --muted:#a0a0aa;
-            --line:#2e2e38; --accent:#5b9bff; --ok:#3fbf90; --warn:#e0a33a; }
+    :root:not([data-theme="light"]) {
+      --page:#0e0f12; --card:#16181c; --ink:#eceef0; --muted:#9aa1ab;
+      --line:#25282e; --sunk:#08090b;
+      --led-green:#3ddc84; --volt:#c8f31d; --volt-ink:#10120a;
+      --ok:#3ddc84; --warn:#e0a33a;
+      --shadow:0 1px 2px rgba(0,0,0,.5), 0 10px 30px -18px rgba(0,0,0,.9);
+    }
   }
-  * { box-sizing: border-box; }
-  body { margin:0; background:var(--bg); color:var(--ink);
-         font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
-  .wrap { max-width: 780px; margin: 0 auto; padding: 32px 20px 64px; }
-  h1 { font-size: 1.6rem; margin: 0 0 4px; }
-  .sub { color: var(--muted); margin: 0 0 28px; }
-  .card { background: var(--card); border: 1px solid var(--line);
-          border-radius: 12px; padding: 20px; margin-bottom: 18px; }
-  .card h2 { font-size: 1.05rem; margin: 0 0 6px; }
-  .card p { margin: 0 0 14px; color: var(--muted); font-size: 0.95rem; }
-  button { font: inherit; font-weight: 600; color: #fff; background: var(--accent);
-           border: 0; border-radius: 8px; padding: 11px 18px; cursor: pointer; }
-  button:hover:not(:disabled) { filter: brightness(1.08); }
-  button:disabled { opacity: .5; cursor: default; }
-  button.secondary { background: transparent; color: var(--accent);
-                     border: 1px solid var(--accent); }
-  .row { display: flex; gap: 10px; flex-wrap: wrap; }
-  .step { display:flex; gap:12px; align-items:flex-start; margin-bottom:14px; }
-  .num { flex:none; width:26px; height:26px; border-radius:50%; background:var(--accent);
-         color:#fff; font-size:.85rem; font-weight:700; display:grid; place-items:center; }
-  .banner { border-radius:10px; padding:14px 16px; margin-bottom:18px; font-size:.95rem; }
-  .banner.warn { background:rgba(224,163,58,.12); border:1px solid rgba(224,163,58,.4); color:var(--warn); }
-  .result { font-size:1.05rem; font-weight:600; margin:14px 0 0; }
-  .result.ok { color: var(--ok); }
-  .result.no { color: var(--warn); }
-  pre { background:#0d0d10; color:#d6d6de; border-radius:8px; padding:14px;
-        overflow-x:auto; font-size:12.5px; line-height:1.45; max-height:340px;
-        white-space:pre-wrap; word-break:break-word; margin:14px 0 0; }
-  details { margin-top: 10px; }
-  summary { cursor: pointer; color: var(--muted); font-size: .9rem; }
+  :root[data-theme="dark"] {
+    --page:#0e0f12; --card:#16181c; --ink:#eceef0; --muted:#9aa1ab;
+    --line:#25282e; --sunk:#08090b;
+    --led-green:#3ddc84; --volt:#c8f31d; --volt-ink:#10120a;
+    --ok:#3ddc84; --warn:#e0a33a;
+    --shadow:0 1px 2px rgba(0,0,0,.5), 0 10px 30px -18px rgba(0,0,0,.9);
+  }
+
+  * { box-sizing:border-box; }
+  /* Author display rules beat the UA stylesheet's [hidden], so restate it. */
+  [hidden] { display:none !important; }
+  body { margin:0; background:var(--page); color:var(--ink);
+         font:400 16px/1.55 Barlow, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  .wrap { max-width:820px; margin:0 auto; padding:28px 20px 72px; }
+
+  /* ---- the band: a black strap with an LED display in it ---- */
+  .band {
+    background:linear-gradient(180deg, var(--device-2), var(--device));
+    border:1px solid var(--device-line); border-radius:16px;
+    padding:26px 26px 22px; margin-bottom:22px; box-shadow:var(--shadow);
+  }
+  .screen { position:relative; padding:6px 2px 2px; }
+  /* The screen-door overlay that makes the text read as discrete LEDs. */
+  .screen::after {
+    content:""; position:absolute; inset:0; pointer-events:none;
+    background-image:radial-gradient(circle at 50% 50%, transparent 42%, rgba(11,12,14,.72) 46%);
+    background-size:4px 4px;
+  }
+  .screen h1 {
+    margin:0; font:700 clamp(1.7rem,5.4vw,2.5rem)/1 "Barlow Condensed", Barlow, sans-serif;
+    letter-spacing:.13em; text-transform:uppercase; color:var(--led-amber);
+    text-shadow:0 0 14px rgba(255,174,0,.5);
+  }
+  .screen .sub {
+    margin:7px 0 0; font:500 11.5px/1.5 "IBM Plex Mono", monospace;
+    letter-spacing:.1em; text-transform:uppercase; color:#aeb6c0;
+  }
+
+  /* ---- the 100-LED goal bar, reused as app status ---- */
+  .ledbar { display:flex; gap:2px; margin:20px 0 10px; height:13px; }
+  .ledbar i {
+    flex:1; border-radius:1px; background:var(--led-off);
+    transition:background .25s ease, box-shadow .25s ease;
+  }
+  .ledbar i.on { box-shadow:0 0 7px currentColor; background:currentColor; }
+  .ledbar.red i.on    { color:var(--led-red); }
+  .ledbar.amber i.on  { color:var(--led-amber); }
+  .ledbar.green i.on  { color:var(--led-green); }
+  .bandstate {
+    font:500 11.5px/1 "IBM Plex Mono", monospace; letter-spacing:.1em;
+    text-transform:uppercase; color:#79818c; display:flex;
+    justify-content:space-between; gap:12px; flex-wrap:wrap;
+  }
+  .bandstate b { color:#c3cad3; font-weight:500; }
+
+  /* ---- cards ---- */
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px;
+          padding:20px 22px; margin-bottom:16px; box-shadow:var(--shadow); }
+  .card h2 {
+    font:700 1.02rem/1.25 "Barlow Condensed", Barlow, sans-serif;
+    letter-spacing:.06em; text-transform:uppercase; margin:0 0 8px;
+    display:flex; align-items:center; gap:10px;
+  }
+  .card h2 .n {
+    flex:none; width:22px; height:22px; border-radius:4px; background:var(--ink);
+    color:var(--card); font:700 12px/22px "IBM Plex Mono", monospace; text-align:center;
+  }
+  .card p { margin:0 0 14px; color:var(--muted); font-size:.94rem; }
+
+  button {
+    font:600 14.5px/1 Barlow, sans-serif; letter-spacing:.04em; text-transform:uppercase;
+    color:var(--volt-ink); background:var(--volt); border:0; border-radius:7px;
+    padding:12px 18px; cursor:pointer;
+  }
+  button:hover:not(:disabled) { filter:brightness(1.1); }
+  button:disabled { opacity:.45; cursor:default; }
+  button.secondary { background:transparent; color:var(--ink); border:1px solid var(--line); }
+  button.secondary:hover:not(:disabled) { border-color:var(--ink); filter:none; }
+  .row { display:flex; gap:9px; flex-wrap:wrap; }
+
+  .step { display:flex; gap:11px; align-items:flex-start; margin-bottom:12px; font-size:.94rem; }
+  .num { flex:none; width:22px; height:22px; border-radius:50%; background:var(--ink);
+         color:var(--card); font:700 11px/22px "IBM Plex Mono", monospace; text-align:center; }
+  .banner { border-radius:9px; padding:13px 16px; margin-bottom:18px; font-size:.93rem;
+            background:rgba(255,174,0,.1); border:1px solid rgba(255,174,0,.35); color:var(--warn); }
+  .result { font-size:1rem; font-weight:600; margin:14px 0 0; }
+  .result.ok { color:var(--ok); } .result.no { color:var(--warn); }
+  pre { background:var(--sunk); color:#c9cdd3; border-radius:9px; padding:15px;
+        overflow-x:auto; font:400 12.5px/1.5 "IBM Plex Mono", monospace;
+        max-height:360px; white-space:pre-wrap; word-break:break-word; margin:14px 0 0; }
+  details { margin-top:12px; border-top:1px solid var(--line); padding-top:12px; }
+  summary { cursor:pointer; color:var(--muted); font:500 12px/1 "IBM Plex Mono", monospace;
+            letter-spacing:.09em; text-transform:uppercase; }
   .hint { font-size:.85rem; color:var(--muted); margin-top:10px; }
-  .grouphead { font:600 11.5px/1 "IBM Plex Mono", ui-monospace, monospace; letter-spacing:.11em;
+  .grouphead { font:600 11px/1 "IBM Plex Mono", monospace; letter-spacing:.11em;
                text-transform:uppercase; color:var(--muted); margin:22px 0 12px;
                padding-bottom:7px; border-bottom:1px solid var(--line); }
   .grouphead:first-child { margin-top:4px; }
-  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:14px; }
-  .grid label { display:flex; flex-direction:column; gap:5px; font-size:.9rem;
-                font-weight:600; color:var(--ink); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:13px; }
+  .grid label { display:flex; flex-direction:column; gap:5px; font:600 .82rem/1.3 Barlow, sans-serif;
+                letter-spacing:.04em; text-transform:uppercase; color:var(--muted); }
   .pair { display:flex; gap:6px; }
   .pair input { flex:1; min-width:0; }
-  input, select { font:inherit; font-weight:400; color:var(--ink); background:var(--bg);
-                  border:1px solid var(--line); border-radius:7px; padding:9px 10px; }
-  input:focus, select:focus { outline:2px solid var(--accent); outline-offset:-1px; }
-  a.dl { display:inline-block; font-weight:600; text-decoration:none; color:var(--accent);
-         border:1px solid var(--accent); border-radius:8px; padding:11px 18px; }
+  input, select { font:400 15px/1.2 Barlow, sans-serif; text-transform:none; letter-spacing:0;
+                  color:var(--ink); background:var(--page); border:1px solid var(--line);
+                  border-radius:6px; padding:10px; }
+  input:focus, select:focus { outline:2px solid var(--volt); outline-offset:-1px; }
+  a.dl { display:inline-block; font:600 14.5px/1 Barlow, sans-serif; letter-spacing:.04em;
+         text-transform:uppercase; text-decoration:none; color:var(--ink);
+         border:1px solid var(--line); border-radius:7px; padding:12px 18px; }
+  :focus-visible { outline:2px solid var(--volt); outline-offset:2px; }
+  @media (prefers-reduced-motion:reduce) { * { transition:none !important; } }
+  @media (max-width:560px) { .wrap { padding:20px 14px 60px; } .band { padding:20px 18px 18px; } }
 </style>
 </head>
 <body>
 <div class="wrap">
 
-  <h1>FuelBand Revival</h1>
-  <p class="sub">Bring an original Nike+ FuelBand back to life. Everything happens on
-  this computer — nothing is sent anywhere.</p>
+  <div class="band">
+    <div class="screen">
+      <h1>Fuelband Revival</h1>
+      <p class="sub">Gen 1 &middot; USB 11ac:6565 &middot; local only</p>
+    </div>
+    <div class="ledbar" id="ledbar" aria-hidden="true"></div>
+    <p class="bandstate">
+      <span id="bandstate">Band status &mdash; <b>not checked yet</b></span>
+      <span>Nothing leaves this computer</span>
+    </p>
+  </div>
 
   <div class="banner warn">
     <strong>Before you start:</strong> plug the band into this computer with its USB
@@ -73,7 +169,7 @@
   </div>
 
   <div class="card">
-    <h2>1. Check the band</h2>
+    <h2><span class="n">1</span> Check the band</h2>
     <p>Confirms the band is connected and tells you whether it's already activated.
     This only reads — it changes nothing.</p>
     <div class="row">
@@ -84,7 +180,7 @@
   </div>
 
   <div class="card">
-    <h2>2. Activate it</h2>
+    <h2><span class="n">2</span> Activate it</h2>
     <p>Only needed if step 1 says the band is <em>not activated</em>. This writes
     settings to the band. It takes about a minute, and the band will restart partway
     through — that's expected.</p>
@@ -103,7 +199,7 @@
   </div>
 
   <div class="card">
-    <h2>3. Your details</h2>
+    <h2><span class="n">3</span> Your details</h2>
     <p>Everything the band stores about you. Press <strong>Read from band</strong> to
     fill this in with what's on it now, change what you like, then save. Anything
     left blank is left alone.</p>
@@ -185,7 +281,7 @@
   </div>
 
   <div class="card">
-    <h2>4. Get your activity out</h2>
+    <h2><span class="n">4</span> Get your activity out</h2>
     <p>Reads the band's current fuel, step and calorie counters and saves them as
     a spreadsheet (CSV) and a data file (JSON) you can keep or import.</p>
     <div class="row">
@@ -208,10 +304,19 @@
     <p>The technical detail, in case you need it or want to share it when asking for help.</p>
     <pre id="out">Ready. Plug in your band and press “Check band”.</pre>
     <details>
-      <summary>Advanced</summary>
-      <div class="row" style="margin-top:10px">
+      <summary>Advanced &mdash; diagnostics</summary>
+      <p class="hint" style="margin:12px 0 0">All read-only. Nothing here writes to the
+      band. The first two help decode the workout history, which nobody has cracked yet
+      &mdash; if you run them, paste the output into an issue.</p>
+      <div class="row" style="margin-top:12px">
+        <button class="secondary" data-action="storereport">Workout-store report</button>
+        <button class="secondary" data-action="findstore">Selector sweep</button>
         <button class="secondary" data-action="settings">Read settings record</button>
+        <button class="secondary" data-action="diagnose">Read diagnostics</button>
       </div>
+      <p class="hint"><b>Workout-store report</b> takes about a minute and gathers
+      everything relevant in one paste-sized block. <b>Selector sweep</b> just probes
+      where data might live.</p>
     </details>
   </div>
 
@@ -227,6 +332,42 @@ const verdict = document.getElementById("verdict");
 const buttons = [...document.querySelectorAll("button[data-action]")];
 
 function setBusy(b) { buttons.forEach((x) => x.disabled = b); }
+
+// ---- the 100-LED bar -------------------------------------------------------
+// The real band lights this bar red, then amber, then green as you close on
+// your daily goal. Here it reports the app's own state on the same scale, so it
+// is a status readout rather than an ornament.
+const LEDS = 40;                    // a readable stand-in for the band's 100
+const ledbar = document.getElementById("ledbar");
+const bandstate = document.getElementById("bandstate");
+for (let i = 0; i < LEDS; i++) ledbar.appendChild(document.createElement("i"));
+const leds = [...ledbar.children];
+
+let sweepTimer = null;
+function setLeds(colour, litFraction, label) {
+  clearInterval(sweepTimer); sweepTimer = null;
+  ledbar.className = "ledbar " + colour;
+  const lit = Math.round(LEDS * litFraction);
+  leds.forEach((el, i) => el.classList.toggle("on", i < lit));
+  if (label) bandstate.innerHTML = label;
+}
+
+// A travelling band of lit LEDs while work is in progress — the same bar, moving.
+function setLedsWorking(label) {
+  ledbar.className = "ledbar amber";
+  bandstate.innerHTML = label;
+  let head = 0;
+  clearInterval(sweepTimer);
+  sweepTimer = setInterval(() => {
+    leds.forEach((el, i) => {
+      const d = (i - head + LEDS) % LEDS;
+      el.classList.toggle("on", d < 6);
+    });
+    head = (head + 1) % LEDS;
+  }, 45);
+}
+
+setLeds("", 0, "Band status &mdash; <b>not checked yet</b>");
 
 // Turn the raw tool output into one plain-English line.
 function interpret(text, action) {
@@ -336,6 +477,7 @@ async function run(action) {
   verdict.hidden = true;
   document.getElementById("pverdict").hidden = true;
   document.querySelectorAll("a.dl").forEach((a) => a.hidden = true);
+  setLedsWorking("Working &mdash; <b>don't unplug the band</b>");
   out.textContent = "Working… (this can take a minute; don't unplug the band)\n\n";
   try {
     const res = await fetch(`/run?action=${encodeURIComponent(action)}${query}`);
@@ -356,6 +498,7 @@ async function run(action) {
       const msg = prefill(all);
       const p = document.getElementById("pverdict");
       if (msg) { p.textContent = msg; p.className = "result ok"; p.hidden = false; }
+      setLeds("green", 1, "Read from band &mdash; <b>done</b>");
       return;                       // `finally` clears the busy state
     }
     const [kind, msg] = interpret(all, action);
@@ -364,8 +507,18 @@ async function run(action) {
       verdict.className = "result " + kind;
       verdict.hidden = false;
     }
+    // Mirror the verdict onto the bar. An activated band fills it green, the way
+    // the real one does when you hit your goal.
+    const imp = all.match(/imprinted\s*=\s*([01])/);
+    if (imp)
+      imp[1] === "1" ? setLeds("green", 1, "Band status &mdash; <b>activated</b>")
+                     : setLeds("red", 0.18, "Band status &mdash; <b>not activated yet</b>");
+    else if (kind === "ok") setLeds("green", 1, "Last action &mdash; <b>done</b>");
+    else if (kind === "no") setLeds("red", 0.18, "Last action &mdash; <b>needs attention</b>");
+    else setLeds("amber", 0.5, "Last action &mdash; <b>finished</b>");
   } catch (e) {
     out.textContent += `\n[error] ${e.message}\n`;
+    setLeds("red", 0.18, "Last action &mdash; <b>failed</b>");
   } finally {
     setBusy(false);
   }
